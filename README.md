@@ -26,13 +26,13 @@ the dataset's **template** subject, and `Group_analysis` becomes its **group** s
 Python 3.12 or newer. With [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv tool install git+https://github.com/neurodynamics-xr/nxr-convert
+uv tool install nxr-convert
 ```
 
 or with [pipx](https://pipx.pypa.io/):
 
 ```bash
-pipx install git+https://github.com/neurodynamics-xr/nxr-convert
+pipx install nxr-convert
 ```
 
 Check the install:
@@ -42,7 +42,7 @@ nxr-convert --version        # nxr-convert 0.2.0 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
-(`NXR_COMPUTE`). Install the extra with `uv tool install "nxr-convert[atlas] @ git+https://github.com/neurodynamics-xr/nxr-convert"`.
+(`NXR_COMPUTE`). Install the extra with `uv tool install "nxr-convert[atlas]"`.
 The conversion commands below need neither.
 
 ## Use with the Cortical Flow desktop app
