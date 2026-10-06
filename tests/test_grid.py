@@ -1,0 +1,58 @@
+"""THE TIMESERIES GRID (2026-09-25): the recording one channel × 2^15 samples an inner chunk and every
+channel × 2^17 a shard; ONE envelope array of 32-sample windows beside it, sharded on the same block.
+The database states the envelope as a closed-form tiling with array-backed min/max (D96)."""
+import json
+
+import numpy as np
+import zarr
+
+import nxr_convert.grid as grid
+from nxr_convert.grid import BLOCK, RAW_CHUNK, WINDOW, ENV_CHUNK, raw_grid
+
+def _reference(x: np.ndarray, window: int = WINDOW) -> np.ndarray:
+    """min/max per window by the definition — slow and obvious; the last window may be partial."""
+    c, n = x.shape
+    nb = -(-n // window)
+    out = np.empty((c, nb, 2), dtype=np.float32)
+    for b in range(nb):
+        seg = x[:, b * window:(b + 1) * window]
+        out[:, b, 0] = seg.min(axis=1)
+        out[:, b, 1] = seg.max(axis=1)
+    return out
+
+
+def test_the_grid_nests_dyadically():
+    assert (WINDOW, RAW_CHUNK, BLOCK, ENV_CHUNK) == (32, 1 << 15, 1 << 17, 4096)
+    assert BLOCK % RAW_CHUNK == 0 and RAW_CHUNK % WINDOW == 0 and ENV_CHUNK * WINDOW == BLOCK
+    assert raw_grid(300, 1_440_000) == ((1, 32768), (300, 131072))
+    assert raw_grid(3, 1000) == ((1, 1000), (3, 1000))                        # shorter than a chunk: one of it
+
+
+def _recording(tmp_path, x):
+    """A recording laid out from its row's layout (``recording_meta``) and populated."""
+    from nxr_convert.crud import layout_array, populate_array
+    at = tmp_path / "rec"
+    layout_array(at, grid.recording_meta(*x.shape))
+    return populate_array(at, x)
+
+
+def test_a_recording_is_sharded_one_channel_per_inner_chunk(tmp_path):
+    a = _recording(tmp_path, np.zeros((3, 200_000), np.float32))
+    doc = json.loads((tmp_path / "rec" / "zarr.json").read_text())
+    assert doc["chunk_grid"]["configuration"]["chunk_shape"] == [3, BLOCK]
+    assert doc["codecs"][0]["name"] == "sharding_indexed" and doc["codecs"][0]["configuration"]["chunk_shape"] == [1, RAW_CHUNK]
+    assert grid.recording_meta(3, 200_000).chunks == (1, RAW_CHUNK)        # the row states the INNER chunk (D57)
+
+
+def test_the_envelope_is_exact_with_a_partial_tail(tmp_path):
+    x = np.random.default_rng(0).standard_normal((3, 1000)).astype(np.float32)
+    n = grid.write_envelope(_recording(tmp_path, x), tmp_path / "env")
+    assert n == -(-1000 // WINDOW)
+    np.testing.assert_array_equal(zarr.open_array(str(tmp_path / "env"))[...], _reference(x))
+
+
+def test_block_boundaries_do_not_change_the_answer(tmp_path, monkeypatch):
+    x = np.random.default_rng(1).standard_normal((2, 5000)).astype(np.float32)
+    monkeypatch.setattr(grid, "BLOCK", 64 * WINDOW)                        # many blocks, one partial at the end
+    grid.write_envelope(_recording(tmp_path, x), tmp_path / "env")
+    np.testing.assert_array_equal(zarr.open_array(str(tmp_path / "env"))[...], _reference(x))

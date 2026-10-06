@@ -1,0 +1,52 @@
+[project]
+name = "nxr-convert"
+version = "0.2.0"
+description = "Convert Brainstorm MEG/EEG protocols into nxr datastores (SQLite rows + Zarr v3 arrays) for the Cortical Flow desktop app."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["brainstorm", "meg", "eeg", "neuroimaging", "zarr", "cortical-flow"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+authors = [
+    { name = "Diellor Basha", email = "diellorbasha@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "h5py>=3.16.0",
+    "numpy>=2.5.2",
+    "pymatreader>=1.2.3",
+    "scipy>=1.18.0",
+    "zarr>=3",
+]
+
+[project.urls]
+Homepage = "https://corticalflow.app"
+Documentation = "https://corticalflow.app/docs"
+Source = "https://github.com/neurodynamics-xr/nxr-convert"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+nxr-convert = "nxr_convert.cli:main"
+
+[project.optional-dependencies]
+atlas = [
+    "nibabel>=5.4.2",
+]
