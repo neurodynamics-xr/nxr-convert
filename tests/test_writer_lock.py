@@ -258,3 +258,33 @@ def test_a_dataset_folder_not_writable_is_refused_clearly_and_still_readable(tmp
         assert status_of(folder) == "pending"                                 # a reader still opens it
     finally:
         folder.chmod(0o755)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes anywhere")
+def test_a_writable_folder_with_a_read_only_database_is_refused_clearly(tmp_path):
+    """The FOLDER is writable (the lock can be taken) but ``dataset.sqlite`` is not (0444, or a -wal/-shm beside it): SQLite would
+    open it and fail at the first write, inside recovery. It is refused as ``DatasetNotWritable`` naming the file, the lock let go."""
+    from nxr_convert.writer_lock import DatasetNotWritable
+    folder = with_pending(tmp_path)
+    db = folder / "dataset.sqlite"
+    db.chmod(0o444)
+    try:
+        with pytest.raises(DatasetNotWritable, match=r"dataset\.sqlite: not writable \(EACCES\)"):
+            open_dataset(folder)
+        assert not (folder / WRITER_LOCK_FILE).exists()                      # the lock it took is let go
+        assert main(["dataset", "recover", str(folder)]) == 1                 # the CLI: a stage:error, no traceback
+        assert status_of(folder) == "pending"                                 # nothing rolled back; a reader still opens it
+    finally:
+        db.chmod(0o644)
+    shm = folder / "dataset.sqlite-shm"
+    shm.write_bytes(b"")
+    shm.chmod(0o444)
+    try:
+        with pytest.raises(DatasetNotWritable, match=r"dataset\.sqlite-shm: not writable \(EACCES\)"):
+            open_dataset(folder)
+    finally:
+        shm.chmod(0o644)
+        shm.unlink()
+    with open_dataset(folder):                   # writable again: it opens, and recovers
+        pass
+    assert status_of(folder) is None

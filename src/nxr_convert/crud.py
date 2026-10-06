@@ -37,7 +37,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
-from .writer_lock import WriterLock, acquire_writer_lock
+from .writer_lock import DatasetNotWritable, WriterLock, acquire_writer_lock, database_not_writable
 from .db import (CATALOG_FILE, DATASET_FILE, STATUS_TABLES, Database, attributes_text, drain, ensure_groups, js_json,
                  location_of, now_utc, open_database, remove_folder, schema_version, uuid7, zarr_json_text)
 
@@ -284,6 +284,13 @@ def open_dataset(folder: str | Path, *, recover_now: bool | None = None, lock: b
             held.release()
         raise ValueError(f"{folder}: recovery rolls back pending rows — only the process that took the writer lock may run it"
                          f"{' (this one borrowed it)' if held is not None else ''}")
+    # A WRITABLE FOLDER, A READ-ONLY DATABASE (0444, or a -wal/-shm that cannot be written): SQLite would open it and fail at
+    # the first write, inside recovery — refused here, clearly, the lock let go (the app opens such a dataset read-only)
+    nw = database_not_writable(folder / DATASET_FILE) if lock else None
+    if nw is not None:
+        if held is not None:
+            held.release()
+        raise DatasetNotWritable(nw[1], nw[0])
     try:
         db = open_database(folder / DATASET_FILE)
     except BaseException:

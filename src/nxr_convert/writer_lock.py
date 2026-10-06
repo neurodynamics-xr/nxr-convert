@@ -60,11 +60,30 @@ class DatasetNotWritable(RuntimeError):
 
     def __init__(self, folder: Path, code: str):
         self.folder, self.code = folder, code
-        super().__init__(f"{folder}: not writable ({code}) — nxr-convert cannot write this dataset (read-only media, or a folder "
-                         "without write permission); copy it somewhere writable")
+        super().__init__(f"{folder}: not writable ({code}) — nxr-convert cannot write this dataset (read-only media, or no write "
+                         "permission); copy it somewhere writable")
 
 
 _NOT_WRITABLE = {errno.EROFS, errno.EACCES, errno.EPERM}
+
+
+def database_not_writable(file: Path) -> tuple[str, Path] | None:
+    """Can this process WRITE a dataset's database? A writable FOLDER (the lock was taken) does not say: ``dataset.sqlite`` may be
+    read-only (0444), or a ``-wal`` / ``-shm`` / ``-journal`` beside it, and SQLite then opens it and fails only at the first write
+    — inside recovery. So the file and its companions that exist, and the folder, must be writable. ``None`` when it can be
+    written; else the first refusal's code (EACCES · EPERM · EROFS) and path. By permission (``os.access``), as the app's
+    ``databaseNotWritable``: a rolled-back trial write in WAL mode never reaches the file."""
+    file = Path(file)
+    for p in (file, Path(f"{file}-wal"), Path(f"{file}-shm"), Path(f"{file}-journal"), file.parent):
+        if p.exists() and not os.access(p, os.W_OK):
+            # os.access answers a boolean; the code is the one a write would meet — EROFS on read-only media, else EACCES
+            try:
+                st = os.statvfs(p)
+                ro = bool(st.f_flag & os.ST_RDONLY)
+            except (OSError, AttributeError):
+                ro = False
+            return ("EROFS" if ro else "EACCES"), p
+    return None
 
 
 def _create(path: Path, folder: Path) -> int:
