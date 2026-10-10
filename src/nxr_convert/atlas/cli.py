@@ -2,9 +2,9 @@
 
     nxr-convert atlas default-subject DATASET --templates DIR [--default fsaverage5] [--options fsaverage6,fsaverage]
         [--hcp-trk hcp1065.trk --hcp-bst-dir <brainstorm @default_subject>] [--depth 8] [--frame-level -18]
-    nxr-convert atlas build DATASET --subject S [--replace] [--trees subject,group] [--kernels all|constrained|free|MN_MEG,…]
+    nxr-convert atlas build DATASET --subject S [--replace] [--trees subject,group] [--kernels all|constrained|free|latest|<method|stamp|name|glob>,…]
         [--frames-domain sphere|cortex] [--lc-levels 4,6] [--trajectory 4,2] [--recordings N] [--no-maps] [--no-meg]
-    nxr-convert atlas reduce DATASET [--from OTHER_DATASET …]
+    nxr-convert atlas reduce DATASET [--from OTHER_DATASET …] [--kernels …]
     nxr-convert atlas info DATASET
 
 DATASET is ``<datastore>/<dataset>`` (its ``dataset.sqlite``): every atlas is rows of it and plain arrays (D129–D134).
@@ -42,7 +42,8 @@ def add_parser(sub) -> None:
     b.add_argument("--subject", required=True)
     b.add_argument("--replace", action="store_true", help="rebuild: remove the subject's previous atlas first")
     b.add_argument("--trees", default="subject,group")
-    b.add_argument("--kernels", default="all", help="all | constrained | free | comma list of methods (e.g. MN_MEG)")
+    b.add_argument("--kernels", default="all", help="comma tokens, kinds AND: all | constrained | free | latest (newest stamp a method) | kernel method, "
+                        "stamp, name or name glob (e.g. dSPM-unscaled_MEG,constrained,latest or 261005_2149)")
     b.add_argument("--frames-domain", choices=["sphere", "cortex"], default="sphere")
     b.add_argument("--lc-levels", default=None, help="levels with explicit Levi-Civita reductions (default: the dataset's)")
     b.add_argument("--trajectory", default=None, help="SPACE,TIME levels of the peak trajectories (default: the dataset's)")
@@ -55,6 +56,8 @@ def add_parser(sub) -> None:
     r.add_argument("dataset", help="<datastore>/<dataset> whose default subject receives the group sums")
     r.add_argument("--from", dest="sources", nargs="+", default=[], metavar="DATASET",
                    help="other datasets whose subjects are summed too (read only; same default subject's group tree)")
+    r.add_argument("--kernels", default="all", help="the members' kernels summed, as build's --kernels; a recording left with two "
+                                                    "kernels of one method and orientation is refused")
 
     i = s.add_parser("info", help="the dataset's default atlas definitions and its atlas rows")
     i.add_argument("dataset")
@@ -79,7 +82,7 @@ def run(a) -> int:
                               recordings=a.recordings, chunk_frames=a.chunk_frames, log=log)
         elif a.atlas_cmd == "reduce":
             from .reduce import reduce_dataset
-            r = reduce_dataset(a.dataset, sources=tuple(a.sources), log=log)
+            r = reduce_dataset(a.dataset, sources=tuple(a.sources), kernels=a.kernels, log=log)
         elif a.atlas_cmd == "info":
             from ..crud import open_dataset
             from .atlas_store import definition

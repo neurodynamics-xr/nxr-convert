@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import time
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 import numpy as np
@@ -71,14 +72,27 @@ def make_frames(store: SubjectStore, domain: str = "sphere") -> tuple[vectors.Fr
     return vectors.Frames(e1, e2, nn, sg), runs, meta
 
 
-def _kernel_selected(kernels: str, method: str, n_orient: int) -> bool:
-    if kernels == "all":
-        return True
-    if kernels == "constrained":
-        return n_orient == 1
-    if kernels == "free":
-        return n_orient == 3
-    return method in kernels.split(",")
+def select_kernels(items: list[tuple], spec: str) -> set[str]:
+    """The kernels ``--kernels`` chooses, by name, from ``(kernel, n_orient, group)`` (a kernel has name · method · stamp).
+
+    ``spec`` is comma tokens; tokens of one kind OR, kinds AND: ``all`` (or nothing) no filter · ``constrained`` | ``free``
+    the orientation · ``latest`` per group × method × orientation the newest stamp only · any other token a KERNEL — its
+    method (``MN_MEG``), its stamp (``261005_2149``), its name, or a glob over its name (``dSPM*_KERNEL_2610*``). So
+    ``dSPM-unscaled_MEG,constrained,latest`` is one kernel a recording. A stamp is per subject (when Brainstorm made it)."""
+    toks = [t.strip() for t in spec.split(",") if t.strip() and t.strip() != "all"]
+    orients = {o for o, t in ((1, "constrained"), (3, "free")) if t in toks}
+    names = [t for t in toks if t not in ("constrained", "free", "latest")]
+    out = [(k, n, g) for k, n, g in items
+           if (not orients or n in orients)
+           and (not names or any(t in (k.method, k.stamp, k.name) or fnmatchcase(k.name, t) for t in names))]
+    if "latest" in toks:
+        newest = {}
+        for k, n, g in out:
+            key = (g, k.method, n)
+            if key not in newest or k.stamp > newest[key].stamp:      # yymmdd_hhmm: the string order is the time order
+                newest[key] = k
+        out = [(k, n, g) for k, n, g in out if newest[(g, k.method, n)] is k]
+    return {k.name for k, _, _ in out}
 
 
 def _measures(prefix: str, arrays: dict[str, np.ndarray]) -> list[tuple[str, str]]:
@@ -305,6 +319,11 @@ def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, me
 
     if meg:
         ks = store.kernels()
+        orient = {k.name: k.n_vertices // store.n_vertices if k.n_vertices % store.n_vertices == 0 else 0 for k in ks}
+        chosen = select_kernels([(k, orient[k.name], k.session) for k in ks if orient[k.name] in (1, 3)], kernels)
+        if ks and not chosen:
+            raise ValueError(f"{store.subject}: --kernels {kernels!r} chooses none of {[k.name for k in ks]}")
+        ks = [k for k in ks if k.name in chosen]
         sessions = {k.session for k in ks}
         recs = [r for r in store.recordings() if r.session in sessions]
         recs = recs[:recordings] if recordings else recs
@@ -313,9 +332,7 @@ def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, me
             frames_id = None
             raw = None                      # read ONCE a recording, when a kernel first needs it (a raw can be GBs)
             for k in (k for k in ks if k.session == rec.session):
-                n_orient = k.n_vertices // store.n_vertices if k.n_vertices % store.n_vertices == 0 else 0
-                if n_orient not in (1, 3) or not _kernel_selected(kernels, k.method, n_orient):
-                    continue
+                n_orient = orient[k.name]
                 t1 = time.time()
                 K = store.array(k.path)
                 if raw is None:
@@ -357,7 +374,7 @@ def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, me
                                 session=rec.session, manifold_id=product, value_type="vector3" if n_orient == 3 else "scalar",
                                 data_type="float32", by_operator_id=k.id, derived_from_id=rec.id,
                                 description="the kernel applied to the recording — stored as its atlas reductions only, never W·x itself",
-                                producer_json=jdump({"method": k.method, "orientation": orientation,
+                                producer_json=jdump({"method": k.method, "stamp": k.stamp, "kernel": k.name, "orientation": orientation,
                                                      "filterbank": "octave power partition (cos/sin crossover, ½ octave)",
                                                      "bad_segments": {**badinfo, "rule": "samples inside a bad span carry no weight; "
                                                                                          "samples = good samples per frame"}}))

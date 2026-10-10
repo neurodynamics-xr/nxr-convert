@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.2**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.3**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.2 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.3 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -112,10 +112,17 @@ nxr-convert remove  --dataset D --subject S [--node <store path>]   # the subjec
 
 ```bash
 nxr-convert atlas default-subject <datastore>/<dataset> --templates <FreeSurfer subjects dir> […]
-nxr-convert atlas build  <datastore>/<dataset> --subject S [--replace] […]
-nxr-convert atlas reduce <datastore>/<dataset> [--from <datastore>/<other dataset> …]   # members of other datasets too
+nxr-convert atlas build  <datastore>/<dataset> --subject S [--replace] [--kernels …] […]
+nxr-convert atlas reduce <datastore>/<dataset> [--from <datastore>/<other dataset> …] [--kernels …]   # members of other datasets too
 nxr-convert atlas info   <datastore>/<dataset>
 ```
+
+`--kernels` chooses the inverse kernels, in `build` and in `reduce`: comma tokens, tokens of one kind OR and kinds AND —
+`all` · `constrained` | `free` · `latest` (per recording, method and orientation, the newest Brainstorm stamp) · a kernel's
+method (`MN_MEG`), stamp (`261005_2149`), name, or a glob over its name. `dSPM-unscaled_MEG,constrained,latest` is one kernel
+a recording. The group atlas sums one kernel per member recording, method and orientation: a member left with two (two
+inverse solutions of one method) is refused, never pooled. Stamps are per subject (when Brainstorm made the kernel), so
+across subjects choose by `latest` or a glob, not by one stamp.
 
 Run `nxr-convert <command> --help` for every flag.
 

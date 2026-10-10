@@ -1,6 +1,6 @@
 [project]
 name = "nxr-convert"
-version = "0.2.2"
+version = "0.2.3"
 description = "Convert Brainstorm MEG/EEG protocols into nxr datastores (SQLite rows + Zarr v3 arrays) for the Cortical Flow desktop app."
 readme = "README.md"
 license = "MIT"

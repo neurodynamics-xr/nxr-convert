@@ -3,7 +3,8 @@ composition (D130/D131) — arrays under ``<default subject>/atlas/`` and the ro
 
 Every mergeable array adds across subjects cell for cell, because every subject's group tree is the default subject's
 tiles. Spatial maps are matched across subjects by their field's KIND (a field's name carries a per-subject stamp, its kind
-does not); spatiotemporal atlases by (task, kernel method, orientation), with time collapsed — subjects share no clock, so
+does not); spatiotemporal atlases by (task, kernel method, orientation) — ONE kernel a member recording each, chosen by
+``kernels`` (a member with two of one method is refused, never pooled) — with time collapsed — subjects share no clock, so
 the group sum is over each subject's frames (and runs). Per-subject stacks (means / densities per leaf) are kept for
 statistics, and the members are the group fields' CONTRIBUTIONS (``field_contribution``).
 
@@ -29,13 +30,14 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from ..crud import Subject, jdump, open_dataset, remove_node
 from ..db import remove_folder
 from .atlas_store import ATLAS_MEASURES, MERGE, default_subject, definition, put
-from .build import BY, _bands_partition, _measure
+from .build import BY, _bands_partition, _measure, select_kernels
 from .nxr_store import SubjectStore
 
 MERGE_OPS = {"sum": np.add, "max": np.maximum, "min": np.minimum}
@@ -80,9 +82,11 @@ def _open_default(dataset, lock: bool):
     return ds, dsub
 
 
-def reduce_dataset(dataset: str | Path, sources: tuple = (), log=print) -> dict:
+def reduce_dataset(dataset: str | Path, sources: tuple = (), kernels: str = "all", log=print) -> dict:
     """Sum the members' group-tree atlases into the default subject (its rows, its ``atlas/`` arrays). A re-run replaces.
-    ``sources``: other datasets whose members are summed too (read only; their group tree must be this one's)."""
+    ``sources``: other datasets whose members are summed too (read only; their group tree must be this one's).
+    ``kernels``: which members' source estimates are summed (``select_kernels``); a member recording with two kernels of one
+    method and orientation left after it is REFUSED — they would sum two inverse solutions into one group atlas."""
     ds, dsub = _open_default(dataset, lock=True)
     opened = []
     try:
@@ -111,6 +115,7 @@ def reduce_dataset(dataset: str | Path, sources: tuple = (), log=print) -> dict:
         spatial, spatial_stack = defaultdict(dict), defaultdict(list)
         temporal, temporal_stack, samples_total = defaultdict(dict), defaultdict(list), defaultdict(float)
         sources = defaultdict(list)                                 # group key → the members' fields it sums
+        kernels_of = defaultdict(list)                              # time group key → "<member>: <kernel>" it sums
         units = {}
         for s, st, part, mds in members:
             mdb = mds.db
@@ -134,14 +139,31 @@ def reduce_dataset(dataset: str | Path, sources: tuple = (), log=print) -> dict:
             # TIME — every source estimate's joint partition on the group tree
             w = st.array("atlas/trees/group/w")
             per_sub = {}
-            for j in mdb.all("SELECT x.*, f.producer_json AS fp, f.id AS fid, r.name AS rec FROM selection x JOIN field f ON f.id = x.of_field_id "
-                            "JOIN field r ON r.id = f.derived_from_id WHERE x.subject_id = ? AND json_extract(x.params_json, '$.joint') IS NOT NULL "
-                            "AND json_extract(x.params_json, '$.atlas.tree') = 'group'", s["id"]):
+            joints = []
+            for j in mdb.all("SELECT x.*, f.producer_json AS fp, f.id AS fid, f.name AS fname, r.name AS rec FROM selection x "
+                            "JOIN field f ON f.id = x.of_field_id JOIN field r ON r.id = f.derived_from_id WHERE x.subject_id = ? "
+                            "AND json_extract(x.params_json, '$.joint') IS NOT NULL AND json_extract(x.params_json, '$.atlas.tree') = 'group'",
+                            s["id"]):
                 p = json.loads(j["fp"] or "{}")
-                task = re.search(r"task-([A-Za-z0-9]+)", j["rec"])
-                key = f"{task.group(1) if task else 'rec'}__{p.get('method')}__{p.get('orientation')}"
                 paths = {r["array_path"] for r in mdb.all("SELECT DISTINCT array_path FROM selection_measurement WHERE selection_id = ?", j["id"])}
                 base = sorted(paths)[0].rsplit("/group/", 1)[0] + "/group"
+                # the kernel: its producer's (0.2.3 on), else its time group's name <rec>__<method>_<stamp> and the estimate's
+                stamp = p.get("stamp") or base.split("atlas/time/", 1)[1].split("/", 1)[0].rsplit("__", 1)[1][len(p.get("method", "")) + 1:]
+                k = SimpleNamespace(name=p.get("kernel") or j["fname"].split(" × ", 1)[-1], method=p.get("method"), stamp=stamp)
+                joints.append((j, p, paths, base, k, 1 if p.get("orientation") == "constrained" else 3))
+            chosen = select_kernels([(k, n, j["rec"]) for j, _, _, _, k, n in joints], kernels)
+            joints = [x for x in joints if x[4].name in chosen]
+            # ONE kernel a recording × method × orientation: two would sum into one group atlas (two inverse solutions)
+            seen = {}
+            for j, p, _, _, k, _ in joints:
+                twin = seen.setdefault((j["rec"], k.method, p.get("orientation")), k.name)
+                if twin != k.name:
+                    raise ValueError(f"{s['name']}: {j['rec']} has two {k.method} ({p.get('orientation')}) kernels, {twin} and {k.name} — "
+                                     f"they would sum into one group atlas; choose one with --kernels (a stamp, a name, or latest)")
+            for j, p, paths, base, k, _ in joints:
+                task = re.search(r"task-([A-Za-z0-9]+)", j["rec"])
+                key = f"{task.group(1) if task else 'rec'}__{p.get('method')}__{p.get('orientation')}"
+                kernels_of[key].append(f"{s['name']}: {k.name}")
                 arrs = {}
                 for path in paths:
                     rel = path[len(base) + 1:]
@@ -202,7 +224,8 @@ def reduce_dataset(dataset: str | Path, sources: tuple = (), log=print) -> dict:
                 condition, method, orientation = key.split("__")
                 fid = group_field(f"group {key}", "source estimate", None,
                                   {"atlas": "time", "condition": condition, "method": method, "orientation": orientation,
-                                   "collapsed": "frames and runs summed: subjects share no clock", "subjects": list(subs)},
+                                   "collapsed": "frames and runs summed: subjects share no clock", "subjects": list(subs),
+                                   "kernels": sorted(set(kernels_of[key])), "kernel_selector": kernels},
                                   sources[("time", key)])
                 _measure(sub, part["id"], [{"measure": ATLAS_MEASURES[n], "of_field_id": fid, "array_path": f"{g}/{n}",
                                             "within_selection_id": bands_id, "within_code": b}
