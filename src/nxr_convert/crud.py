@@ -29,7 +29,7 @@ from . import _zarr_compat  # noqa: F401  (hardlink-less filesystems)
 
 import json
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field as dc_field
 from functools import lru_cache
 from pathlib import Path
@@ -415,18 +415,13 @@ def layout_array(at: Path, meta: ArrayMeta, attributes: str | None = None) -> No
 def populate_array(at: Path, data: np.ndarray | None = None, *, dense: bool = False):
     """POPULATE the laid-out array at ``at`` (whole, when ``data`` is given); returns the zarr array for chunk writes."""
     import zarr
-    if dense:
-        # EVERY CHUNK ON DISK (a missing chunk reaches the renderer as a 404 it cannot predict); a 3-D grid is c/<i>/<j>/<k>,
-        # and on exFAT concurrent directory creation races — serialised
-        with zarr.config.set({"async.concurrency": 1, "array.write_empty_chunks": True}):
-            a = zarr.open_array(str(at), mode="r+")
-            if data is not None:
-                a[...] = data
-            return a
-    a = zarr.open_array(str(at), mode="r+")
-    if data is not None and a.size:
-        a[...] = data
-    return a
+    # dense: EVERY CHUNK ON DISK (a missing chunk reaches the renderer as a 404 it cannot predict); a 3-D grid is
+    # c/<i>/<j>/<k>, and on exFAT concurrent directory creation races — serialised
+    with zarr.config.set({"async.concurrency": 1, "array.write_empty_chunks": True}) if dense else nullcontext():
+        a = zarr.open_array(str(at), mode="r+")
+        if data is not None and (dense or a.size):
+            a[...] = data
+        return a
 
 
 # ══ COORDINATE SYSTEMS (spacesFor, D25–D28) ═══════════════════════════════════════════════════════════════════════════
@@ -812,11 +807,11 @@ class Subject:
             self.db.insert("operator", {"id": oid, "subject_id": self.id, "name": name, "path": path, "kind": kind,
                                         "from_manifold_id": from_manifold_id, "layout": layout, "n_rows": int(n_rows), "n_cols": int(n_cols),
                                         **(meta.row() if meta else {}), **self._prov(cols.pop("created_utc", None)), **cols})
-        pop = self._array_populate("operator", oid, meta, data, populate, False) if path else None
-        if sparse is not None and path:
-            def pop(at: Path) -> None:                                          # noqa: F811
-                for part, arr in sparse.items():
-                    self.write_array(f"{path}/{part}", arr)
+        def write_sparse(at: Path) -> None:
+            for part, arr in sparse.items():
+                self.write_array(f"{path}/{part}", arr)
+        pop = None if not path else write_sparse if sparse is not None else \
+            self._array_populate("operator", oid, meta, data, populate, False)
         return self.node("operator", oid, rows, pop)
 
     def selection(self, *, name: str, path: str | None, type: str, manifold_id: str | None = None, data: np.ndarray | None = None,
@@ -840,11 +835,11 @@ class Subject:
                 codes = np.asarray(el).ravel()
                 if picked:
                     self.db.conn.executemany("INSERT INTO selection_element (selection_id, element, code) VALUES (?, ?, NULL)",
-                                             ((sid, int(c)) for c in codes))
+                                             ((sid, c) for c in codes.astype(np.int64, copy=False).tolist()))
                     self.db.execute("UPDATE selection SET n_elements = ? WHERE id = ?", int(codes.size), sid)
                 else:
                     self.db.conn.executemany("INSERT INTO selection_element (selection_id, element, code) VALUES (?, ?, ?)",
-                                             ((sid, i, int(c)) for i, c in enumerate(codes)))
+                                             ((sid, i, c) for i, c in enumerate(codes.astype(np.int64, copy=False).tolist())))
                     self.db.execute("UPDATE selection SET n_elements = ?, n_members = (SELECT count(DISTINCT code) FROM "
                                     "selection_element WHERE selection_id = ?) WHERE id = ?", int(codes.size), sid, sid)
             if spans is not None:
@@ -914,6 +909,3 @@ class Subject:
     def by_name(self, table: str, name: str) -> dict | None:
         return self.db.one(f"SELECT * FROM {table} WHERE subject_id = ? AND name = ?", self.id, name)
 
-
-def subject_template(ds: Dataset) -> dict | None:
-    return ds.template()

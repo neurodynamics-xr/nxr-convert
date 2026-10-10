@@ -37,12 +37,6 @@ ATLAS_MEASURES = {
 MERGE = {m: ("max" if m in ("max", "envelope_max") else "min" if m == "min" else "sum") for m in ATLAS_MEASURES.values()}
 
 
-def merge_of(rel: str) -> str | None:
-    """How the array at ``rel`` (relative to its statistics group) merges — None for an explicit array."""
-    m = ATLAS_MEASURES.get(rel)
-    return MERGE[m] if m else None
-
-
 def default_subject(ds) -> dict | None:
     """The dataset's DEFAULT SUBJECT (D127): the template named ``@default_subject``, else its template."""
     return (ds.db.one("SELECT * FROM subject WHERE dataset_id = ? AND name = ? AND status = 'complete'", ds.id, DEFAULT_SUBJECT)

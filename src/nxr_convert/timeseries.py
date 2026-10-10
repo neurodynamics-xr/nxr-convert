@@ -22,9 +22,9 @@ import numpy as np
 
 from .crud import Subject, jdump, lattice_counts, populate_array
 from .db import ensure_groups
-from .entities import labelling
+from .entities import flag_levels, labelling
 from .events import export_events, parse_events
-from .grid import BLOCK, WINDOW, envelope_path, recording_meta, write_envelope
+from .grid import BLOCK, WINDOW, EnvelopeTee, envelope_path, recording_meta
 
 
 def _time_line(sub: Subject, path: str, *, session: str, n_samples: int, sfreq: float, t0: float) -> str:
@@ -40,14 +40,9 @@ def _write_flags(sub: Subject, rec_path: str, flags: Any, *, session: str, chann
     f = np.asarray(flags).ravel()
     if not f.size:
         return
-    named = {1: "good", -1: "bad"}
-    unknown = sorted({int(v) for v in f} - set(named))
-    if unknown:
-        raise ValueError(f"{rec_path}: channel flags hold {unknown}, which is neither 1 (good) nor -1 (bad)")
-    present = sorted({int(v) for v in f}, reverse=True)
-    labelling(sub, f"{rec_path}_flags", [present.index(int(v)) for v in f], [named[v] for v in present], manifold_id=channels_id,
-              dictionary=f"{rec_path.rsplit('/', 1)[-1]}_flags", scope="subject",
-              colors=[[90, 170, 110] if v == 1 else [228, 87, 86] for v in present],
+    codes, levels, colors = flag_levels(f, f"{rec_path}: ")
+    labelling(sub, f"{rec_path}_flags", codes, levels, manifold_id=channels_id,
+              dictionary=f"{rec_path.rsplit('/', 1)[-1]}_flags", scope="subject", colors=colors,
               session=session, description="the recording's own channel flags", of_field_id=of_id)
 
 
@@ -60,10 +55,8 @@ def _recording(sub: Subject, name: str, *, n_chan: int, n_samples: int, sfreq: f
     meta = recording_meta(n_chan, n_samples)
 
     def populate(at: Path) -> None:
-        arr = populate_array(at)
-        write(arr)
         ensure_groups(sub.store, envelope_path(rec), self_too=False)
-        write_envelope(arr, sub.at(envelope_path(rec)))
+        write(EnvelopeTee(populate_array(at), sub.at(envelope_path(rec))))
         if progress:
             progress({"stage": "envelope", "name": name})
     rid = sub.field(name=name, path=rec, kind="recording", manifold_id=product, meta=meta, populate=populate, session=session,
@@ -120,7 +113,7 @@ def export_raw_timeseries(sub: Subject, name: str, sfile: dict, channel_flag: np
     def write(arr) -> None:
         for s0 in range(0, n_t, block):
             n = min(block, n_t - s0)
-            arr[:, s0:s0 + n] = read_bst(sfile, s0=s0, n=n, path=bst_path).astype(np.float32)
+            arr[:, s0:s0 + n] = read_bst(sfile, s0=s0, n=n, path=bst_path)
             if progress:
                 progress({"stage": "raw-stream", "name": name, "written": s0 + n, "of": n_t})
     return _recording(sub, name, n_chan=n_chan, n_samples=n_t, sfreq=sfreq, t0=t0, session=session, channels_id=channels_id,
@@ -141,7 +134,7 @@ def export_timeseries(sub: Subject, name: str, data_mat: dict, *, kind: str = "s
         raise ValueError(f"{name}: not a Brainstorm data file (need .Time with >=2 samples)")
     sfreq = 1.0 / float(np.mean(np.diff(t)))
     n_chan, n_t = f.shape
-    f32 = f.astype(np.float32)
+    f32 = f.astype(np.float32, copy=False)
 
     def write(arr) -> None:
         for s0 in range(0, n_t, BLOCK):

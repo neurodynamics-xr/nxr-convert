@@ -18,7 +18,8 @@ import numpy as np
 
 from .crud import Subject, jdump
 from .db import uuid7
-from .entities import label_set, labelling
+from .entities import flag_levels, label_set, labelling
+from .matio import struct_rows
 
 _UNIT_BY_TYPE = {
     "MEG": "T", "MEG REF": "T", "MEG MAG": "T", "MEG GRAD": "T",
@@ -31,14 +32,6 @@ def channel_units_for_types(types: list[str]) -> list[str]:
     return [_UNIT_BY_TYPE.get(str(t).strip().upper(), "") for t in types]
 
 
-def _channel_list(chan: dict) -> list[dict]:
-    ch = chan["Channel"]
-    if isinstance(ch, dict):   # pymatreader: struct array → dict of lists
-        n = len(ch["Name"])
-        return [{k: (v[i] if isinstance(v, (list, np.ndarray)) and len(v) == n else v) for k, v in ch.items()} for i in range(n)]
-    return list(ch)
-
-
 def _family(values: list[str]) -> tuple[list[int], list[str]]:
     levels = list(dict.fromkeys(values))          # order-stable, unique
     return [levels.index(v) for v in values], levels
@@ -46,7 +39,7 @@ def _family(values: list[str]) -> tuple[list[int], list[str]]:
 
 def export_sensors(sub: Subject, channel_mat: dict, channel_flag: np.ndarray, *, name: str, session: str,
                    source_sha1: str | None = None) -> dict:
-    channels = _channel_list(channel_mat)
+    channels = struct_rows(channel_mat["Channel"], "Name")
     names = [str(c["Name"]) for c in channels]
     types = [str(c["Type"]) for c in channels]
     units = channel_units_for_types(types)
@@ -85,13 +78,8 @@ def export_sensors(sub: Subject, channel_mat: dict, channel_flag: np.ndarray, *,
             families.append((fam, codes, levels, None))
     flags = np.asarray(channel_flag).ravel() if channel_flag is not None and np.size(channel_flag) else None
     if flags is not None and flags.size == n:
-        named = {1: "good", -1: "bad"}
-        unknown = sorted({int(v) for v in flags} - set(named))
-        if unknown:
-            raise ValueError(f"channel flags hold {unknown}, which is neither 1 (good) nor -1 (bad)")
-        present = sorted({int(v) for v in flags}, reverse=True)      # good first
-        families.append(("quality", [present.index(int(v)) for v in flags], [named[v] for v in present],
-                         np.array([[90, 170, 110] if v == 1 else [228, 87, 86] for v in present], dtype=np.uint8)))
+        codes, levels, colors = flag_levels(flags)
+        families.append(("quality", codes, levels, np.array(colors, dtype=np.uint8)))
     label_set(sub, f"{path}_labels", [(f, np.asarray(c), l, col) for f, c, l, col in families], manifold_id=mid, session=session,
               description="the montage families — " + ", ".join(f[0] for f in families))
     return {"name": name, "id": mid, "n_channels": n, "modalities": modalities, "names": names}

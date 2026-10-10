@@ -17,7 +17,6 @@ rolled back at the next open (``crud.recover``). Everything skipped is reported 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,7 +29,8 @@ Emit = Callable[[dict], None]
 
 def stamp() -> str:
     import sys
-    return f"nxr-convert {version('nxr-convert')} / Python {sys.version.split()[0]}"
+    from . import __version__
+    return f"nxr-convert {__version__} / Python {sys.version.split()[0]}"
 
 
 def _conditions(root: Path, subject: str) -> tuple[list[str], list[str]]:

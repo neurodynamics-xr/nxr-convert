@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 
 from .crud import Subject, jdump
-from .matio import load_mat
+from .matio import load_mat, load_mat_vars
 from .naming import sanitize_node_name, surface_node_name
 from .surface import export_surface, folder_for_surface
 
@@ -50,6 +50,10 @@ def find_source_maps(cond_dir: str | Path) -> list[Path]:
 
 def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str | Path, session: str | None) -> dict[str, Any]:
     p = Path(results_file)
+    nt = np.size(load_mat_vars(p, ["Time"]).get("Time"))          # PROBED: a time-resolved map is V × T, never loaded
+    if nt > 2:
+        raise ValueError(f"{p.name}: a map over {nt} time points needs a time Line — "
+                         "only static maps (one value per vertex) are converted")
     m = load_mat(p)
     if not is_source_map(m):
         raise ValueError(f"{p.name}: not a source map (needs a non-empty ImageGridAmp and no ImagingKernel)")

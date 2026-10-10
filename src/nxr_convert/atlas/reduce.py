@@ -16,6 +16,12 @@ statistics, and the members are the group fields' CONTRIBUTIONS (``field_contrib
 The rows: the default subject's tile partition at depth D carries the ``atlas`` params (tree group · level · gauge) and,
 per group field (pathless — its reductions are its only bytes), the array-backed measurements, band arrays ``within`` the
 default subject's ``atlas bands``.
+
+ACROSS DATASETS (``sources``): members may also come from OTHER datasets (read only, no lock) — the case of a pipeline that
+keeps one dataset per subject. Each source must carry a default subject whose group tree at depth D is the target's, code
+for code, and the same atlas definitions; else it is refused. A member of another dataset is named ``<dataset>/<subject>``;
+its contribution is recorded in the group field's ``producer_json`` (``sources``), since ``field_contribution`` can only
+name subjects of this database.
 """
 from __future__ import annotations
 
@@ -53,30 +59,65 @@ def _group_partition(db, sid: str, surface: str) -> dict | None:
                   "AND json_extract(params_json, '$.joint') IS NULL AND name LIKE '% group tiles L%'", sid)
 
 
-def reduce_dataset(dataset: str | Path, log=print) -> dict:
-    """Sum the members' group-tree atlases into the default subject (its rows, its ``atlas/`` arrays). A re-run replaces."""
-    ds = open_dataset(dataset)
+#: what makes two datasets' default atlases the same (ids such as the frames field's differ between databases)
+DEFINING = ("depth", "frame_s", "frame_level", "bands_hz", "lc_levels", "trajectory")
+
+
+def _group_tree(ds, dsub: dict, D: int) -> tuple[dict, np.ndarray]:
+    """The default subject's tile partition at depth D, and its codes (one tile per vertex)."""
+    part = ds.db.one("SELECT * FROM selection WHERE subject_id = ? AND name = ? AND type = 'set'", dsub["id"], f"cortex_pial tiles L{D}")
+    if part is None:
+        raise ValueError(f"{ds.row['name']}/{dsub['name']}: the group atlas needs 'cortex_pial tiles L{D}' — the default subject's tiles at its depth")
+    return part, SubjectStore(ds, dsub).array(part["path"])
+
+
+def _open_default(dataset, lock: bool):
+    ds = open_dataset(dataset, lock=lock)
+    dsub = default_subject(ds)
+    if dsub is None:
+        ds.close()
+        raise FileNotFoundError(f"{dataset}: the dataset has no default subject (nxr-convert atlas default-subject)")
+    return ds, dsub
+
+
+def reduce_dataset(dataset: str | Path, sources: tuple = (), log=print) -> dict:
+    """Sum the members' group-tree atlases into the default subject (its rows, its ``atlas/`` arrays). A re-run replaces.
+    ``sources``: other datasets whose members are summed too (read only; their group tree must be this one's)."""
+    ds, dsub = _open_default(dataset, lock=True)
+    opened = []
     try:
-        dsub = default_subject(ds)
-        if dsub is None:
-            raise FileNotFoundError(f"{ds.row['name']}: the dataset has no default subject (nxr-convert atlas default-subject)")
         d = definition(ds)
         D = int(d.get("depth", 8))
         db = ds.db
+        _, codes = _group_tree(ds, dsub, D)
         members, skipped = [], []
-        for s in db.all("SELECT * FROM subject WHERE dataset_id = ? AND id <> ? AND status = 'complete' ORDER BY name", ds.id, dsub["id"]):
-            st = SubjectStore(ds, s)
-            part = _group_partition(db, s["id"], st.surface)
-            if part is None or not (st.path / "atlas" / "trees" / "group").exists():
-                skipped.append({"subject": s["name"], "reason": "no group-tree atlas (nxr-convert atlas build)"})
-                continue
-            members.append((s, st, part))
+        for src in sources:
+            sds, sdsub = _open_default(src, lock=False)
+            opened.append(sds)
+            if any(definition(sds).get(k) != d.get(k) for k in DEFINING):
+                raise ValueError(f"{src}: its atlas definitions differ from {ds.row['name']}'s — not the same group atlas")
+            if not np.array_equal(_group_tree(sds, sdsub, D)[1], codes):
+                raise ValueError(f"{src}: its default subject's group tree differs from {ds.row['name']}'s — tiles would not add")
+        for mds in [ds, *opened]:
+            mdsub = default_subject(mds)
+            for s in mds.db.all("SELECT * FROM subject WHERE dataset_id = ? AND id <> ? AND status = 'complete' ORDER BY name", mds.id, mdsub["id"]):
+                name = s["name"] if mds is ds else f"{mds.row['name']}/{s['name']}"
+                st = SubjectStore(mds, s)
+                part = _group_partition(mds.db, s["id"], st.surface)
+                if part is None or not (st.path / "atlas" / "trees" / "group").exists():
+                    skipped.append({"subject": name, "reason": "no group-tree atlas (nxr-convert atlas build)"})
+                    continue
+                members.append(({**s, "name": name}, st, part, mds))
         spatial, spatial_stack = defaultdict(dict), defaultdict(list)
         temporal, temporal_stack, samples_total = defaultdict(dict), defaultdict(list), defaultdict(float)
         sources = defaultdict(list)                                 # group key → the members' fields it sums
         units = {}
-        for s, st, part in members:
-            ms = db.all("SELECT m.*, f.kind AS fkind, f.unit AS funit FROM selection_measurement m JOIN field f ON f.id = m.of_field_id "
+        for s, st, part, mds in members:
+            mdb = mds.db
+            # a member of another dataset: named in the producer (field_contribution names only this database's subjects)
+            ref = ({"subject_id": s["id"]} if mds is ds else
+                   {"dataset": mds.row["name"], "subject": s["name"].split("/", 1)[1], "subject_id": s["id"]})
+            ms = mdb.all("SELECT m.*, f.kind AS fkind, f.unit AS funit FROM selection_measurement m JOIN field f ON f.id = m.of_field_id "
                         "WHERE m.selection_id = ? AND m.array_path IS NOT NULL", part["id"])
             # SPATIAL — by the field's kind
             by_field = defaultdict(list)
@@ -88,18 +129,18 @@ def reduce_dataset(dataset: str | Path, log=print) -> dict:
                 arrs = {r["array_path"][len(prefix) + 1:]: st.array(r["array_path"]) for r in rows}
                 _merge(spatial[kind], arrs)
                 spatial_stack[kind].append((s["name"], arrs["s1"] / np.where(arrs["w"] > 0, arrs["w"], np.nan)))
-                sources[("spatial", kind)].append({"subject_id": s["id"], "source_field_id": fid})
+                sources[("spatial", kind)].append({**ref, "source_field_id": fid})
                 units[kind] = rows[0]["funit"]
             # TIME — every source estimate's joint partition on the group tree
             w = st.array("atlas/trees/group/w")
             per_sub = {}
-            for j in db.all("SELECT x.*, f.producer_json AS fp, f.id AS fid, r.name AS rec FROM selection x JOIN field f ON f.id = x.of_field_id "
+            for j in mdb.all("SELECT x.*, f.producer_json AS fp, f.id AS fid, r.name AS rec FROM selection x JOIN field f ON f.id = x.of_field_id "
                             "JOIN field r ON r.id = f.derived_from_id WHERE x.subject_id = ? AND json_extract(x.params_json, '$.joint') IS NOT NULL "
                             "AND json_extract(x.params_json, '$.atlas.tree') = 'group'", s["id"]):
                 p = json.loads(j["fp"] or "{}")
                 task = re.search(r"task-([A-Za-z0-9]+)", j["rec"])
                 key = f"{task.group(1) if task else 'rec'}__{p.get('method')}__{p.get('orientation')}"
-                paths = {r["array_path"] for r in db.all("SELECT DISTINCT array_path FROM selection_measurement WHERE selection_id = ?", j["id"])}
+                paths = {r["array_path"] for r in mdb.all("SELECT DISTINCT array_path FROM selection_measurement WHERE selection_id = ?", j["id"])}
                 base = sorted(paths)[0].rsplit("/group/", 1)[0] + "/group"
                 arrs = {}
                 for path in paths:
@@ -112,7 +153,7 @@ def reduce_dataset(dataset: str | Path, log=print) -> dict:
                 samples_total[key] += smp
                 prev = per_sub.get(key)
                 per_sub[key] = (total if prev is None else prev[0] + total, smp if prev is None else prev[1] + smp)
-                sources[("time", key)].append({"subject_id": s["id"], "source_field_id": j["fid"]})
+                sources[("time", key)].append({**ref, "source_field_id": j["fid"]})
             for key, (tot, smp) in per_sub.items():
                 temporal_stack[key].append((s["name"], tot / (np.where(w > 0, w, np.nan)[None, :] * smp)))
 
@@ -121,9 +162,7 @@ def reduce_dataset(dataset: str | Path, log=print) -> dict:
         for r in db.all("SELECT id FROM field WHERE subject_id = ? AND path IS NULL AND producer_json LIKE '%\"atlas\"%'", sub.id):
             remove_node(db, ds.root, "field", r["id"])
         remove_folder(sub.at("atlas"))
-        part = db.one("SELECT * FROM selection WHERE subject_id = ? AND name = ? AND type = 'set'", sub.id, f"cortex_pial tiles L{D}")
-        if part is None:
-            raise ValueError(f"{dsub['name']}: the group atlas needs 'cortex_pial tiles L{D}' — the default subject's tiles at its depth")
+        part, _ = _group_tree(ds, dsub, D)
         frames = db.one("SELECT id FROM field WHERE subject_id = ? AND name = 'cortex_pial_canonical_frames'", sub.id)
         bands = [tuple(b) for b in d.get("bands_hz", [])]
         with sub.composition():
@@ -135,6 +174,10 @@ def reduce_dataset(dataset: str | Path, log=print) -> dict:
             bands_id = _bands_partition(sub, bands) if (bands and temporal) else None
 
             def group_field(name: str, kind: str, unit, producer: dict, contributions: list) -> str:
+                foreign = [c for c in contributions if "dataset" in c]
+                if foreign:
+                    producer = {**producer, "sources": foreign}
+                contributions = [c for c in contributions if "dataset" not in c]
                 return sub.field(name=name, path=None, kind=kind, manifold_id=part["manifold_id"], data_type="float32", unit=unit,
                                  function="sum", description="the group sum over the dataset's members — its reductions only (D130)",
                                  producer_json=jdump(producer), contributions=contributions)
@@ -167,4 +210,6 @@ def reduce_dataset(dataset: str | Path, log=print) -> dict:
         log(f"dataset atlas: {len(members)} members; spatial {sorted(spatial)}; time {sorted(temporal)}; skipped {skipped}")
         return {"members": len(members), "skipped": skipped, "spatial": sorted(spatial), "time": sorted(temporal)}
     finally:
+        for o in opened:
+            o.close()
         ds.close()

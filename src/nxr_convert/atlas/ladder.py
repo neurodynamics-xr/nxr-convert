@@ -14,7 +14,12 @@ The port follows the TypeScript step for step, so a stored code is the tile the 
     vertex to the farthest one ``a``, from ``a`` to the farthest one ``b``; "farthest" is the
     first vertex, in vertex order, at the largest finite distance);
   * the tile's vertices are ordered by d_a − d_b, a STABLE sort (ties keep vertex order), and
-    cut where the running mass first reaches half the tile's mass (both halves keep a vertex).
+    cut where the running mass first reaches half the tile's mass (both halves keep a vertex);
+  * every tile is ONE PIECE (Diellor, 2026-10-10, decision 98b0f3df; nsp feat/atlas 6f41886): the cut
+    can leave a child in pieces, so the even child keeps only its largest piece (by mass; ties: the
+    piece with the lowest vertex) and the rest goes to its sibling, then the odd child does the same.
+    Connectivity counts only edges inside the tile. In a connected parent both children come out
+    connected, the parent is unchanged — so roll-ups stay exact.
 
 One difference in HOW, never in what: the sweeps of all the tiles of a level run as ONE
 multi-source Dijkstra over the graph with the edges between tiles removed (tiles are then
@@ -28,7 +33,7 @@ from functools import cmp_to_key
 
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
-from scipy.sparse.csgraph import dijkstra
+from scipy.sparse.csgraph import connected_components, dijkstra
 
 
 def vertex_areas(positions: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -95,13 +100,32 @@ def _first_argmax(labels: np.ndarray, values: np.ndarray, n_tiles: int) -> np.nd
     return out
 
 
-def _sweep(graph: csr_matrix, labels: np.ndarray, sources: np.ndarray) -> np.ndarray:
-    """Dijkstra from one source per tile, confined to the tile: the edges between tiles are dropped."""
+def _inner(graph: csr_matrix, labels: np.ndarray) -> csr_matrix:
+    """The graph with the edges between tiles dropped."""
     g = graph.tocoo()
     keep = labels[g.row] == labels[g.col]
-    inner = csr_matrix((g.data[keep], (g.row[keep], g.col[keep])), shape=graph.shape)
+    return csr_matrix((g.data[keep], (g.row[keep], g.col[keep])), shape=graph.shape)
+
+
+def _one_piece(graph: csr_matrix, labels: np.ndarray, mass: np.ndarray, parity: int) -> np.ndarray:
+    """Children of the given parity keep their largest piece (by mass; ties: lowest piece); the rest goes to the sibling."""
+    _, comp = connected_components(_inner(graph, labels), directed=False)
+    cm = np.bincount(comp, weights=mass)
+    tile = np.zeros(len(cm), dtype=np.int64)
+    tile[comp] = labels
+    best = np.full(labels.max() + 1, -1, dtype=np.int64)
+    for c in np.argsort(-cm, kind="stable")[::-1]:      # lightest first, so the heaviest (then lowest id) wins
+        best[tile[c]] = c
+    move = (labels % 2 == parity) & (best[labels] != comp)
+    out = labels.copy()
+    out[move] ^= 1
+    return out
+
+
+def _sweep(graph: csr_matrix, labels: np.ndarray, sources: np.ndarray) -> np.ndarray:
+    """Dijkstra from one source per tile, confined to the tile: the edges between tiles are dropped."""
     src = sources[sources >= 0]
-    return dijkstra(inner, directed=False, indices=src, min_only=True)
+    return dijkstra(_inner(graph, labels), directed=False, indices=src, min_only=True)
 
 
 @dataclass
@@ -165,6 +189,7 @@ def surface_ladder(positions: np.ndarray, faces: np.ndarray, max_tiles: int | No
             for t, members in _groups(prev, big):
                 totals[t] = np.cumsum(mass[members])[-1]
             nxt[order] = _halves(prev[order], mass[order], totals)
+        nxt = _one_piece(graph, _one_piece(graph, nxt, mass, 0), mass, 1)
         new_counts = np.bincount(nxt, minlength=2 * tiles)
         if np.any(new_counts == 0):
             break

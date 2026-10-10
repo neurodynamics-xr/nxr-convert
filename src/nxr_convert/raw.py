@@ -26,7 +26,7 @@ import numpy as np
 def read_bst(sfile: dict, *, s0: int = 0, n: int | None = None,
              channels: tuple[int, int] | None = None,
              path: str | Path | None = None) -> np.ndarray:
-    """Read ``[nchannels, n]`` float64 from a BST-BIN link, samples
+    """Read ``[nchannels, n]`` float32 — the file's own values — from a BST-BIN link, samples
     ``[s0, s0+n)`` relative to the file start. ``channels=(c0, c1)`` reads a
     contiguous 0-based channel range — channels are contiguous within an
     epoch, so a range costs one seek per epoch, and it is what keeps the
@@ -44,7 +44,7 @@ def read_bst(sfile: dict, *, s0: int = 0, n: int | None = None,
         raise ValueError(f"read [{s0}, {s0+n}) outside [0, {n_total})")
     p = Path(path or sfile["filename"])
 
-    out = np.empty((n_chan, n), dtype=np.float64)
+    out = np.empty((n_chan, n), dtype=np.float32)
     got = 0
     with open(p, "rb") as f:
         e0 = s0 // epoch_size

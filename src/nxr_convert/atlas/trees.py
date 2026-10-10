@@ -113,12 +113,6 @@ class Template:
     meta: dict = field(default_factory=dict)
     resolutions: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)   # name → hemi → parent vertex
 
-    def codes_at(self, resolution: str | None, hemi: str) -> np.ndarray:
-        """The finest codes of every vertex of an optional resolution (inherited from its default parent)."""
-        if resolution in (None, self.name):
-            return self.codes[hemi]
-        return self.codes[hemi][self.resolutions[resolution][hemi]]
-
     def tree_for(self, sphere: np.ndarray, structures: np.ndarray, names: list[str] | None = None,
                  depth: int | None = None) -> Tree:
         """Assign a subject's vertices to the group tree: nearest fsaverage vertex on the sphere."""

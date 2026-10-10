@@ -70,6 +70,18 @@ def rgb255(c) -> list[int]:
     return [int(round(float(x) * scale)) for x in c]
 
 
+def flag_levels(flags: np.ndarray, where: str = "") -> tuple[list[int], list[str], list[list[int]]]:
+    """Brainstorm's channel flags (1 good · -1 bad) as a labelling: a code per channel, the levels present (good first),
+    their colours."""
+    named = {1: "good", -1: "bad"}
+    present = sorted({int(v) for v in flags}, reverse=True)
+    unknown = [v for v in present if v not in named]
+    if unknown:
+        raise ValueError(f"{where}channel flags hold {sorted(unknown)}, which is neither 1 (good) nor -1 (bad)")
+    return ([present.index(int(v)) for v in flags], [named[v] for v in present],
+            [[90, 170, 110] if v == 1 else [228, 87, 86] for v in present])
+
+
 def time_spans(sub: Subject, path: str, spans: Sequence[tuple[float, float, int]], types: Sequence[str], *, line_id: str,
                of_field_id: str, session: str | None, colors=None, description: str, params: dict | None = None) -> str:
     """A ``spans`` Selection on a time Line (D87/D143): a member per interval, ``[start, stop)`` in seconds (an

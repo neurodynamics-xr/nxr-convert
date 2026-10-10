@@ -249,12 +249,14 @@ def _raw_link_facts(root: Path, rel: str) -> dict:
     if F is None:
         return {}
     out: dict = {}
-    fmt = _s(getattr(F, "format", "") or "")
+    if not isinstance(F, dict):
+        return {}
+    fmt = _s(F.get("format") or "")
     if fmt:
         out["raw_format"] = fmt
-    prop = getattr(F, "prop", None)
-    times = _as_list(getattr(prop, "times", None)) if prop is not None else []
-    sfreq = getattr(prop, "sfreq", None) if prop is not None else None
+    prop = F.get("prop") or {}
+    times = _as_list(prop.get("times"))
+    sfreq = prop.get("sfreq")
     try:
         sfreq = float(sfreq)
     except (TypeError, ValueError):

@@ -59,17 +59,24 @@ def reduce_windows(x: np.ndarray, window: int = WINDOW) -> np.ndarray:
     return np.stack([np.minimum.reduceat(x, starts, axis=1), np.maximum.reduceat(x, starts, axis=1)], axis=-1)
 
 
-def write_envelope(source, dest: Path) -> int:
-    """The recording's envelope array at ``dest`` — ONE array of windows, reduced a BLOCK at a time (one shard each)
-    from ``source`` (the recording, a zarr array). Returns the window count."""
-    n_chan, n_samples = source.shape
-    n_win = -(-n_samples // WINDOW)
-    chunks, shards = env_grid(n_chan, n_win)
-    meta = array_meta(np.float32, (n_chan, n_win, 2), chunks=chunks, shards=shards, compress=False)
-    layout_array(dest, meta)
-    env = populate_array(dest)
-    for s0 in range(0, n_samples, BLOCK):
-        x = np.asarray(source[:, s0:s0 + BLOCK], dtype=np.float32)
+class EnvelopeTee:
+    """The recording's zarr array, its ENVELOPE (at ``dest``) reduced from each block AS IT IS WRITTEN — one pass over
+    the raw, never a read back. A write must be a whole-channel block starting on a window boundary, whole windows
+    long except at the end (every writer's is: a BLOCK, a multiple of WINDOW)."""
+
+    def __init__(self, arr, dest: Path):
+        n_chan, n_samples = arr.shape
+        n_win = -(-n_samples // WINDOW)
+        chunks, shards = env_grid(n_chan, n_win)
+        layout_array(dest, array_meta(np.float32, (n_chan, n_win, 2), chunks=chunks, shards=shards, compress=False))
+        self.arr, self.env, self.shape = arr, populate_array(dest), arr.shape
+
+    def __setitem__(self, key: tuple[slice, slice], x) -> None:
+        rows, cols = key
+        x = np.asarray(x, dtype=np.float32)
+        s0 = cols.start or 0
+        if rows != slice(None) or s0 % WINDOW or (x.shape[1] % WINDOW and s0 + x.shape[1] != self.shape[1]):
+            raise ValueError(f"envelope: a write at {key} is not a whole-channel block on window boundaries")
+        self.arr[key] = x
         w0 = s0 // WINDOW
-        env[:, w0:w0 + -(-x.shape[1] // WINDOW), :] = reduce_windows(x)
-    return n_win
+        self.env[:, w0:w0 + -(-x.shape[1] // WINDOW), :] = reduce_windows(x)

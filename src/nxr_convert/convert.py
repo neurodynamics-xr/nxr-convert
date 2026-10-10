@@ -19,10 +19,10 @@ import numpy as np
 
 from .crud import Subject
 from .inverse import export_forward, export_inverse
-from .matio import load_mat, load_mat_vars
+from .matio import load_mat, load_mat_vars, struct_rows
 from .naming import (channel_node_name, claim_node_name, headmodel_node_name, kernel_node_name, recording_node_name,
                      source_fingerprint, surface_node_name)
-from .sensors import _channel_list, export_sensors
+from .sensors import export_sensors
 from .surface import export_surface, folder_for_surface
 from .timeseries import export_raw_timeseries, export_timeseries
 
@@ -114,10 +114,11 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
     # ---- the channels ----
     chan = load_mat(channel_file)
     first = load_mat(data_files[0]) if data_files else None
+    raw_mat = None
     if first is not None:
         flags = np.asarray(first["ChannelFlag"])
     else:
-        raw_link = load_mat(raw_data_file)
+        raw_link = raw_mat = load_mat(raw_data_file)
         cf = raw_link.get("ChannelFlag")
         if cf is None and isinstance(raw_link.get("F"), dict):
             cf = raw_link["F"].get("channelflag")
@@ -127,7 +128,7 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
     chan_name, chan_shared = claim_node_name(sub, "timeseries", channel_node_name(channel_file), session, chan_fp)
     if chan_shared:
         row = sub.find("manifold", f"timeseries/{chan_name}")
-        ch_names = [str(c["Name"]) for c in _channel_list(chan)]
+        ch_names = [str(c["Name"]) for c in struct_rows(chan["Channel"], "Name")]
         si = {"name": chan_name, "id": row["id"], "n_channels": int(row["n_vertices"]), "names": ch_names}
         _emit(progress, stage="sensors-shared", name=chan_name, n_channels=si["n_channels"])
     else:
@@ -140,7 +141,7 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
         ti = export_timeseries(sub, recording_node_name(df), data, session=session, channels_id=si["id"], channel_names=si["names"])
         _emit(progress, stage="timeseries", **{k: ti[k] for k in ("name", "n_samples", "sfreq", "events")})
     if raw_data_file is not None:
-        raw_mat = load_mat(raw_data_file)
+        raw_mat = raw_mat or load_mat(raw_data_file)
         sfile = raw_mat["F"]
         if not isinstance(sfile, dict):
             raise ValueError(f"{raw_data_file} is not a raw link (F is a matrix)")
@@ -178,9 +179,9 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
         gl = go = None
         fwd_id: str | None = None
         if hm_path:
-            hm = load_mat(hm_path)
-            gl_arr = np.asarray(hm.get("GridLoc")) if hm.get("GridLoc") is not None else np.empty(0)
-            if require_source_grid and not gl_arr.size:
+            # PROBED, and once per head model: the Gain (~84 MB) is decoded only when the forward is written
+            grid = fwd_done.get(hm_path) or load_mat_vars(hm_path, ["GridLoc", "GridOrient"])
+            if require_source_grid and (grid.get("GridLoc") is None or not np.size(grid["GridLoc"])):
                 _emit(progress, stage="skip-kernel", file=str(kf), reason="modal head model (empty GridLoc)")
                 continue
             if hm_path not in fwd_done:
@@ -190,11 +191,11 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
                     fi = {"name": hm_name, "id": sub.find("operator", hm_name)["id"]}
                     _emit(progress, stage="forward-shared", name=hm_name)
                 else:
-                    fi = export_forward(sub, hm, session=session, name=hm_name, channels_id=si["id"], surface_id=surface_id,
+                    fi = export_forward(sub, load_mat(hm_path), session=session, name=hm_name, channels_id=si["id"], surface_id=surface_id,
                                         n_channels=si["n_channels"], n_vertices=n_vertices, head_model_file=hm_path,
                                         bst_root=str(bst_root), write_gain=write_gain, source_sha1=hm_fp)
                     _emit(progress, stage="forward", name=fi["name"])
-                fwd_done[hm_path] = {"name": fi["name"], "id": fi["id"], "GridLoc": hm.get("GridLoc"), "GridOrient": hm.get("GridOrient")}
+                fwd_done[hm_path] = {"name": fi["name"], "id": fi["id"], "GridLoc": grid.get("GridLoc"), "GridOrient": grid.get("GridOrient")}
             f = fwd_done[hm_path]
             fwd_id, gl, go = f["id"], f["GridLoc"], f["GridOrient"]
         k_fp = source_fingerprint([kf], f"{si['id']}|{surface_id}|{fwd_id}".encode())
@@ -285,7 +286,7 @@ def add_inverse(sub: Subject, *, kernel_file: str | Path, session: str, bst_root
         if len(chans) != 1:
             raise FileNotFoundError(f"{kernel_file.parent}: {len(chans)} channel*.mat — pass --channel-file")
         channel_file = chans[0]
-    channel_names = [str(c["Name"]) for c in _channel_list(load_mat(channel_file))]
+    channel_names = [str(c["Name"]) for c in struct_rows(load_mat(channel_file)["Channel"], "Name")]
     info = export_inverse(sub, kern, session=session, name=name, channels_id=channels_id, surface_id=surface_id,
                           forward_id=forward_id, kernel_file=str(kernel_file), bst_root=str(bst_root), channel_names=channel_names,
                           n_vertices=int(surface["n_vertices"]), grid_loc=gl, grid_orient=go, source_sha1=fp)

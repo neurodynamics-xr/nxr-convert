@@ -27,7 +27,7 @@ def _protocol() -> Path | None:
 
 
 PROTOCOL = _protocol()
-has_protocol = PROTOCOL is not None and PROTOCOL.is_dir()
+has_protocol = PROTOCOL is not None and (PROTOCOL / "data").is_dir()   # a protocol, not just its folder
 
 
 # ── the transpose ────────────────────────────────────────────────────────────

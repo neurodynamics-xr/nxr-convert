@@ -255,7 +255,7 @@ def _to_codes(cube: np.ndarray, labels: dict[str, Any]) -> tuple[np.ndarray, dic
     names = list(labels["names"])
     colors = np.asarray(labels["colors"], dtype=np.uint8).reshape(-1, 3)
     present = np.unique(cube)
-    missing = [int(v) for v in present if v not in set(src.tolist())]
+    missing = np.setdiff1d(present, src).astype(np.int64).tolist()
     if missing:
         src = np.concatenate([src, np.asarray(missing, dtype=np.int64)])
         names += [f"unlabelled {v}" for v in missing]

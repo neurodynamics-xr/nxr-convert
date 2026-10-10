@@ -876,6 +876,22 @@ CREATE TABLE sync_job (
   error       TEXT
 ) STRICT;
 CREATE UNIQUE INDEX sync_job_pending ON sync_job (table_name, row_id, op) WHERE done_utc IS NULL;
+-- ── INDEXES ADDED WITHOUT A VERSION ── (2026-10-07) a parent's DELETE looks up its children by these columns; without an
+-- index each cascade or SET NULL scans the child table (a selection delete scanned all of selection_measurement). Added
+-- WITHOUT a version (an index changes no table): `openDatabase` runs this block on a database built before it.
+CREATE INDEX IF NOT EXISTS selection_measurement_within_selection ON selection_measurement (within_selection_id);
+CREATE INDEX IF NOT EXISTS operator_from_selection ON operator (from_selection_id);
+CREATE INDEX IF NOT EXISTS operator_to_selection ON operator (to_selection_id);
+CREATE INDEX IF NOT EXISTS operator_factor_selection ON operator_factor (factor_selection_id);
+CREATE INDEX IF NOT EXISTS manifold_partition ON manifold (partition_id);
+CREATE INDEX IF NOT EXISTS manifold_geometry ON manifold (geometry_id);
+CREATE INDEX IF NOT EXISTS selection_of_field ON selection (of_field_id);
+CREATE INDEX IF NOT EXISTS selection_dictionary ON selection (dictionary_id);
+CREATE INDEX IF NOT EXISTS field_derived_from ON field (derived_from_id);
+CREATE INDEX IF NOT EXISTS field_contribution_source ON field_contribution (source_field_id);
+-- the sync queue's own: the drain seeks the oldest PENDING job, never scanning the finished history
+CREATE INDEX IF NOT EXISTS sync_job_queue ON sync_job (id) WHERE done_utc IS NULL;
+-- ── END INDEXES ADDED WITHOUT A VERSION ──
 
 -- ─── JOBS (D59) — a user-triggered COMPUTATION, on either host. The standard backend shape: the
 -- request is a row (what, over which inputs, with which parameters, asked by whom), a worker —
@@ -1092,6 +1108,18 @@ SELECT s.id, s.dataset_id, s.name, s.path, s.kind, s.template_id,
                  AND (SELECT count(*) FROM manifold m WHERE m.subject_id = s.id AND m.operator = 'relativeDirac') > 0))) AS is_warm,
        s.source_format, s.source_path, s.created_utc, s.modified_utc
 FROM subject s;
+
+-- the DASHBOARD's numbers in one read (app/src/pages/Dashboard.tsx): a total per class, and per kind or type the tallies its
+-- breakdowns draw — the same rows the screens' views list (subject_status is one row a subject; session_view one a session)
+CREATE VIEW dashboard_counts AS
+SELECT 'subjects' AS what, NULL AS name, count(*) AS n FROM subject
+UNION ALL SELECT 'sessions', NULL, count(*) FROM session_view
+UNION ALL SELECT 'recordings', NULL, count(*) FROM recording_view
+UNION ALL SELECT 'seconds', NULL, coalesce(sum(duration_s), 0) FROM recording_view
+UNION ALL SELECT 'fields', kind, count(*) FROM field_view GROUP BY kind
+UNION ALL SELECT 'manifolds', type, count(*) FROM manifold_view GROUP BY type
+UNION ALL SELECT 'selections', type, count(*) FROM selection_view GROUP BY type
+UNION ALL SELECT 'operators', kind, count(*) FROM operator_view GROUP BY kind;
 
 
 -- ── BEGIN GENERATED: the attribute views (backend/scripts/gen-attribute-views.mjs) — do not edit ──

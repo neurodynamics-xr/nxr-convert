@@ -154,3 +154,25 @@ def test_levi_civita_tensor_rotation_commutes_with_frame_sums():
     t11 = (np.abs(R1) ** 2).reshape(V, 8, 100).sum(-1) * w[:, None]
     np.add.at(direct, node, t11)
     assert np.allclose(r["lc"][2]["t11"][0], direct, rtol=1e-4)
+
+
+def test_band_tensor_on_tower_tiles_is_chunk_invariant():
+    from nxr_convert.atlas.tower import Placement
+    pos, faces, s = two_hemispheres(2)
+    blocks = np.r_[pos[: len(pos) // 2] + [0.05, 0, 0], pos[len(pos) // 2:] - [0.05, 0, 0]]
+    fr = analytic_frames(blocks)
+    t = subject_tree(pos, faces, s, depth=3)
+    area = vertex_areas(pos, faces)
+    rng = np.random.default_rng(9)
+    K = rng.standard_normal((3 * len(pos), 5)).astype(np.float32)
+    data = rng.standard_normal((5, 3000)).astype(np.float32)
+    codes = Placement("r", 1200.0, 3000, start_s=100.1).sample_codes(-18)
+    a = band_tensor(t, area, fr, K, data, 1200.0, [(8.0, 16.0)], chunk_frames=1, codes=codes)
+    b = band_tensor(t, area, fr, K, data, 1200.0, [(8.0, 16.0)], chunk_frames=5, codes=codes)
+    for key in a["tensor"]:
+        assert np.allclose(a["tensor"][key], b["tensor"][key], rtol=1e-4, atol=1e-6 * np.abs(a["tensor"][key]).max())
+    assert np.array_equal(a["samples"], np.bincount(codes - codes[0]))
+    # the fixed-length path is the same computation with codes = sample // spf
+    c = band_tensor(t, area, fr, K, data, 1200.0, [(8.0, 16.0)], frame_s=0.25, chunk_frames=3)
+    d = band_tensor(t, area, fr, K, data, 1200.0, [(8.0, 16.0)], chunk_frames=2, codes=np.arange(3000) // 300)
+    assert np.allclose(c["tensor"]["total"], d["tensor"]["total"], rtol=1e-4)

@@ -109,23 +109,46 @@ def analytic_bands(x: np.ndarray, sfreq: float, bands: list[tuple[float, float]]
         yield b, sfft.ifft(X * h, axis=-1, workers=-1).astype(np.complex64, copy=False)
 
 
+def frame_index(n: int, sfreq: float, frame_s: float | None = None, codes: np.ndarray | None = None):
+    """(frame of each of the n samples counted from 0, typical samples per frame). From the samples' time
+    tiles ``codes`` when given (the tower of cycles: whole tiles, a per-tile sample count), else fixed
+    ``frame_s`` frames from the first sample."""
+    if codes is not None:
+        c = np.asarray(codes, dtype=np.int64)
+        if c.shape != (n,) or np.any(np.diff(c) < 0):
+            raise ValueError("codes must give one non-decreasing time tile per sample")
+        f = c - c[0]
+        return f, max(int(np.ceil(n / (f[-1] + 1))), 1)
+    spf = int(round(frame_s * sfreq))
+    return np.arange(n) // spf, spf
+
+
+def frame_starts(f: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(frames, first sample of each) of a non-decreasing run of frame indices — for ``reduceat``."""
+    st = np.flatnonzero(np.r_[True, f[1:] != f[:-1]])
+    return f[st], st
+
+
 # ── MEG band power on the cortex ────────────────────────────────────────────────────────────
 
 def band_power(trees: "Tree | dict[str, Tree]", area: np.ndarray, kernel: np.ndarray, data: np.ndarray, sfreq: float,
                bands: list[tuple[float, float]], frame_s: float = 0.25, chunk_frames: int = 16, good: np.ndarray | None = None,
-               progress=None) -> dict:
+               progress=None, codes: np.ndarray | None = None) -> dict:
     """Per band × leaf × frame: Σ a·|J|², Σ a·|J|, max |J|, with J = K·A the cortical current of each band.
 
     ``kernel`` is [vertices, channels], ``data`` [channels, samples] in the kernel's column order.
     The band's analytic signal is taken over the WHOLE record at the sensors (exact: the inverse is
     linear), then projected in chunks of frames. ``trees`` may be one tree or {name: tree}: every tree
     is filled from the same projection (the costly part), and the result is keyed the same way.
+    ``codes`` [samples]: the time tile of each sample (e.g. ``Placement.sample_codes`` on the tower of
+    cycles; tiles need not hold a whole number of samples) — frame k is tile codes[0] + k. Without it,
+    frames are ``frame_s`` long from the first sample.
     """
     single = isinstance(trees, Tree)
     tset = {"_": trees} if single else dict(trees)
-    spf = int(round(frame_s * sfreq))
     n = data.shape[-1]
-    n_frames = int(np.ceil(n / spf))
+    f_all, spf = frame_index(n, sfreq, frame_s, codes)
+    n_frames = int(f_all[-1]) + 1
     K = np.asarray(kernel, dtype=np.float32)
     ops = {k: leaf_operator(t, area) for k, t in tset.items()}
     res = {k: {"power": np.zeros((len(bands), t.n_leaves, n_frames)),
@@ -133,7 +156,7 @@ def band_power(trees: "Tree | dict[str, Tree]", area: np.ndarray, kernel: np.nda
                "envmax": np.full((len(bands), t.n_leaves, n_frames), -np.inf)} for k, t in tset.items()}
     g_all = np.ones(n, bool) if good is None else np.asarray(good, bool)
     # good samples per frame: a bad sample carries no current and no count, so every sum stays mergeable
-    samples = np.add.reduceat(g_all.astype(np.int64), np.arange(0, n, spf))
+    samples = np.bincount(f_all, weights=g_all, minlength=n_frames).astype(np.int64)
     step = spf * chunk_frames
     for b, A in analytic_bands(data, sfreq, bands):
         Ar, Ai = np.ascontiguousarray(A.real), np.ascontiguousarray(A.imag)
@@ -144,19 +167,14 @@ def band_power(trees: "Tree | dict[str, Tree]", area: np.ndarray, kernel: np.nda
             Jr, Ji = K @ (Ar[:, s:e] * gm), K @ (Ai[:, s:e] * gm)  # [V, T]: two real GEMMs; bad samples → 0
             p = Jr * Jr + Ji * Ji
             m = np.sqrt(p)
-            k0, k1 = s // spf, int(np.ceil(e / spf))
-            # frame sums: pad the chunk to whole frames (the last frame may be partial)
-            pad = k1 * spf - e
-            if pad:
-                p = np.pad(p, ((0, 0), (0, pad)))
-                m = np.pad(m, ((0, 0), (0, pad)))
-            ps = p.reshape(len(p), k1 - k0, spf).sum(-1, dtype=np.float64)
-            mf = m.reshape(len(m), k1 - k0, spf)
-            ms, mx = mf.sum(-1, dtype=np.float64), mf.max(-1)
+            # frame sums; a frame cut by the chunk edge is completed by the next chunk (sums add, maxima merge)
+            fi, st = frame_starts(f_all[s:e])
+            ps = np.add.reduceat(p, st, axis=1, dtype=np.float64)
+            ms, mx = np.add.reduceat(m, st, axis=1, dtype=np.float64), np.maximum.reduceat(m, st, axis=1)
             for k, t in tset.items():
-                res[k]["power"][b, :, k0:k1] = ops[k] @ ps
-                res[k]["env"][b, :, k0:k1] = ops[k] @ ms
-                res[k]["envmax"][b, :, k0:k1] = _leaf_extreme(t, mx, np.maximum)
+                res[k]["power"][b, :, fi] += (ops[k] @ ps).T
+                res[k]["env"][b, :, fi] += (ops[k] @ ms).T
+                res[k]["envmax"][b, :, fi] = np.maximum(res[k]["envmax"][b, :, fi], _leaf_extreme(t, mx, np.maximum).T)
         if progress:
             progress(b)
     for k in tset:

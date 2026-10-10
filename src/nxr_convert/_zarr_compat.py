@@ -24,9 +24,9 @@ from pathlib import Path
 
 import zarr.storage._local as _local
 
-_HARDLINK_ERRNOS = {errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM, errno.EXDEV, 45}
+_HARDLINK_ERRNOS = {errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM, errno.EXDEV}
 
-_orig_safe_move = _local._safe_move
+_orig_safe_move = getattr(_local, "_safe_move", None)   # private: a zarr without it is left alone
 
 
 def _safe_move_with_fallback(src: Path, dst: Path) -> None:
@@ -41,4 +41,5 @@ def _safe_move_with_fallback(src: Path, dst: Path) -> None:
         os.replace(src, dst)
 
 
-_local._safe_move = _safe_move_with_fallback
+if _orig_safe_move is not None:
+    _local._safe_move = _safe_move_with_fallback

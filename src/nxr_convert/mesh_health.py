@@ -148,14 +148,6 @@ def check_mesh(vertices: np.ndarray, faces: np.ndarray, *, area_eps: float = 1e-
     )
 
 
-def health_attrs(h: MeshHealth) -> dict:
-    """The verdict as the surface node carries it (`mesh_health`), so a CONSUMER that builds
-    operators from the mesh can decide before it builds them — and an unclean mesh is still viewable."""
-    return {"non_manifold_edges": h.non_manifold_edges, "duplicate_faces": h.duplicate_faces, "degenerate_faces": h.degenerate_faces,
-            "isolated_vertices": h.isolated_vertices, "boundary_edges": h.boundary_edges, "inconsistent_winding_edges": h.inconsistent_winding_edges,
-            "fatal": bool(h.fatal), "summary": h.summary() if h.fatal else "clean"}
-
-
 def require_healthy(h: MeshHealth, *, surface: str, primary: bool) -> None:
     """WARN about a fatal surface and let the import proceed (2026-09-23, register D56): the
     verdict travels with the node as `mesh_health`, so a consumer that builds operators from

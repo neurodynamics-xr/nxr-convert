@@ -23,6 +23,8 @@ from typing import Any
 
 import numpy as np
 
+from .matio import struct_rows
+
 
 @dataclass(frozen=True)
 class EventTable:
@@ -57,26 +59,6 @@ def rejoin_cellstr(value: Any) -> list[str]:
     if len(items) > 1 and all(len(s) == 1 for s in items):
         return ["".join(items)]
     return items
-
-
-def _entries(events: Any) -> list[dict]:
-    """Brainstorm's events struct array as a list of per-type dicts, whatever
-    pymatreader made of it (dict-of-lists from scipy, list-of-dicts from h5py)."""
-    if events is None:
-        return []
-    if isinstance(events, dict):
-        labels = events.get("label")
-        if labels is None:
-            return []
-        if isinstance(labels, str):
-            return [{k: v for k, v in events.items()}]
-        n = len(labels)
-        out = []
-        for i in range(n):
-            out.append({k: (v[i] if isinstance(v, (list, np.ndarray)) and len(v) == n else v)
-                        for k, v in events.items()})
-        return out
-    return [dict(e) for e in events]
 
 
 def _color(entry: dict) -> list[float]:
@@ -147,7 +129,7 @@ def parse_events(events: Any, channel_names: list[str] | None = None) -> EventTa
     colors: list[list[float]] = []
     rows: list[tuple[float, float, int, list[int]]] = []
 
-    for entry in _entries(events):
+    for entry in struct_rows(events, "label"):
         label = str(entry.get("label", ""))
         times = _times_matrix(entry)
         if times.size == 0:

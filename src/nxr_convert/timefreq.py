@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from .crud import Subject, jdump
-from .matio import load_mat
+from .matio import load_mat, load_mat_vars
 from .naming import surface_node_name
 
 
@@ -73,9 +73,9 @@ def export_timefreq(sub: Subject, mat_path: str | Path, *, session: str | None, 
     bands (the surface this subject's, else the dataset's template's — D55); a group average's contributions are the
     members' fields. None when the file is not source-level."""
     p = Path(mat_path)
-    m = load_mat(p)
-    if str(m.get("DataType", "")) != "results":
+    if str(load_mat_vars(p, ["DataType"]).get("DataType", "")) != "results":      # probed: a sensor-level TF is never loaded
         return None
+    m = load_mat(p)
     tf = np.asarray(m["TF"])
     if tf.ndim == 3 and tf.shape[1] == 1:
         tf = tf[:, 0, :]

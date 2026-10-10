@@ -9,7 +9,8 @@ import zarr
 from atlas_meshes import icosphere
 from nxr_convert.atlas import bands as fb
 from nxr_convert.atlas import rollup, scalars
-from nxr_convert.atlas.ladder import surface_ladder, vertex_areas
+from nxr_convert.atlas.ladder import _inner, edge_graph, surface_ladder, vertex_areas
+from scipy.sparse.csgraph import connected_components
 
 
 def bumpy_sphere(level=4, seed=0):
@@ -32,12 +33,15 @@ def test_ladder_bisection_nests_and_halves_mass_on_an_irregular_mesh():
         assert np.array_equal(lad.labels[-1] >> (lad.finest - l), child)                # the levels are arithmetic
         m_child, m_parent = lad.tile_areas(l), lad.tile_areas(l - 1)
         assert (np.bincount(child, minlength=2 ** l) > 0).all()                         # no empty tile
-        # EQUAL MASS: each half is half its parent, to within the heaviest vertex of that parent
-        heaviest = np.zeros(2 ** (l - 1))
-        np.maximum.at(heaviest, parent, mass)
+        # EQUAL MASS: each half is half its parent — the cut is to within one vertex, and making a tile ONE PIECE
+        # (decision 98b0f3df) moves its islands to the sibling, so: within 5 % where tiles hold ≥ 32 vertices
         even, odd = m_child[0::2], m_child[1::2]
         assert np.allclose(even + odd, m_parent)
-        assert (np.abs(even - m_parent / 2) <= heaviest + 1e-15).all()
+        if len(p) / 2 ** l >= 32:
+            assert (np.abs(even - m_parent / 2) <= 0.05 * m_parent).all()
+        # ONE PIECE: every tile is connected through edges inside it
+        _, comp = connected_components(_inner(edge_graph(p, f), child), directed=False)
+        assert all(len(np.unique(comp[child == t])) == 1 for t in range(2 ** l))
 
 
 def test_ladder_breaks_when_a_gate_fails():

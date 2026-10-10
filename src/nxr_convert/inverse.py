@@ -21,17 +21,13 @@ projector step exists or is written.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from .db import now_utc
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .crud import Subject, default_chunks, jdump
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 _METHOD = {
@@ -154,7 +150,7 @@ def export_inverse(sub: Subject, kernel: dict, *, session: str, name: str, chann
     if source_sha1:
         producer["source_sha1"] = source_sha1
     producer = _jsonable(producer)
-    stamp = _utc_now()
+    stamp = now_utc(ms=False)
 
     sel_id = sub.selection(name=f"{name}_channels", path=f"{name}_channels", type="indices", manifold_id=channels_id,
                            data=picked, picked=True, session=session,
@@ -168,7 +164,7 @@ def export_inverse(sub: Subject, kernel: dict, *, session: str, name: str, chann
                 and g["to_value_type"] in (None, "scalar")):
             pair = {"inverts_id": forward_id, "inverse_kind": "regularized"}
     inv = inverse_method_of(producer)
-    kf32 = k.astype(np.float32)
+    kf32 = k.astype(np.float32, copy=False)
     kid = sub.operator(name=name, path=name, kind="inverse kernel", from_manifold_id=channels_id, to_manifold_id=surface_id,
                        from_selection_id=sel_id, from_value_type="scalar", to_value_type="vector3" if is_free else "scalar",
                        layout="dense", n_rows=int(nsrc), n_cols=int(m), data=kf32, chunks=default_chunks(kf32.shape, 4),
@@ -239,7 +235,7 @@ def export_forward(sub: Subject, head_model: dict, *, session: str, name: str, c
                        data=g, compress=True if g is not None else None, session=session,
                        description=f"{name} — the leadfield, source field to sensor field",
                        comment=str(_scalar(head_model["Comment"])) if not _empty(head_model.get("Comment")) else None,
-                       producer_json=jdump(_jsonable(producer)), created_utc=_utc_now())
+                       producer_json=jdump(_jsonable(producer)), created_utc=now_utc(ms=False))
     if gl.size:
         sub.field(name=f"{name}_GridLoc", path=f"{name}_GridLoc", kind="GridLoc", manifold_id=surface_id, value_type="vector3",
                   data=gl.astype(np.float32), of_operator_id=hid, session=session, unit="m")

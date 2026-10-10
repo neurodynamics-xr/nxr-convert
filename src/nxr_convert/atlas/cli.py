@@ -1,10 +1,10 @@
 """``nxr-convert atlas …`` — the dyadic atlas producer's subcommands (wired into ``nxr_convert.cli``).
 
     nxr-convert atlas default-subject DATASET --templates DIR [--default fsaverage5] [--options fsaverage6,fsaverage]
-        [--hcp-trk hcp1065.trk --hcp-bst-dir <brainstorm @default_subject>] [--depth 8] [--frame 0.25]
+        [--hcp-trk hcp1065.trk --hcp-bst-dir <brainstorm @default_subject>] [--depth 8] [--frame-level -18]
     nxr-convert atlas build DATASET --subject S [--replace] [--trees subject,group] [--kernels all|constrained|free|MN_MEG,…]
         [--frames-domain sphere|cortex] [--lc-levels 4,6] [--trajectory 4,2] [--recordings N] [--no-maps] [--no-meg]
-    nxr-convert atlas reduce DATASET
+    nxr-convert atlas reduce DATASET [--from OTHER_DATASET …]
     nxr-convert atlas info DATASET
 
 DATASET is ``<datastore>/<dataset>`` (its ``dataset.sqlite``): every atlas is rows of it and plain arrays (D129–D134).
@@ -35,7 +35,7 @@ def add_parser(sub) -> None:
     d.add_argument("--gate-mm", type=float, default=5.0)
     d.add_argument("--lc-levels", default="4,6", help="levels of the Levi-Civita connection")
     d.add_argument("--depth", type=int, default=8, help="the default leaf depth of the dataset's atlases")
-    d.add_argument("--frame", type=float, default=0.25, help="the default time tile (s) at level 0")
+    d.add_argument("--frame-level", type=int, default=-18, help="the base frame: a cycle of this tower level (86 400·2^L s; −18 ≈ 0.33 s)")
 
     b = s.add_parser("build", help="write one subject's atlases (rows of its dataset, arrays in its store)")
     b.add_argument("dataset", help="<datastore>/<dataset>")
@@ -52,7 +52,9 @@ def add_parser(sub) -> None:
     b.add_argument("--no-meg", action="store_true")
 
     r = s.add_parser("reduce", help="sum the subjects' group-tree atlases into the default subject's atlas (D131)")
-    r.add_argument("dataset")
+    r.add_argument("dataset", help="<datastore>/<dataset> whose default subject receives the group sums")
+    r.add_argument("--from", dest="sources", nargs="+", default=[], metavar="DATASET",
+                   help="other datasets whose subjects are summed too (read only; same default subject's group tree)")
 
     i = s.add_parser("info", help="the dataset's default atlas definitions and its atlas rows")
     i.add_argument("dataset")
@@ -67,7 +69,7 @@ def run(a) -> int:
                                       options=tuple(x for x in a.options.split(",") if x),
                                       hcp_trk=a.hcp_trk, hcp_bst_dir=a.hcp_bst_dir, gate_mm=a.gate_mm,
                                       lc_levels=tuple(int(x) for x in a.lc_levels.split(",") if x.strip()),
-                                      depth=a.depth, frame_s=a.frame, log=log)
+                                      depth=a.depth, frame_level=a.frame_level, log=log)
         elif a.atlas_cmd == "build":
             from .build import build_subject
             r = build_subject(a.dataset, a.subject, trees=tuple(a.trees.split(",")), replace=a.replace,
@@ -77,7 +79,7 @@ def run(a) -> int:
                               recordings=a.recordings, chunk_frames=a.chunk_frames, log=log)
         elif a.atlas_cmd == "reduce":
             from .reduce import reduce_dataset
-            r = reduce_dataset(a.dataset, log=log)
+            r = reduce_dataset(a.dataset, sources=tuple(a.sources), log=log)
         elif a.atlas_cmd == "info":
             from ..crud import open_dataset
             from .atlas_store import definition

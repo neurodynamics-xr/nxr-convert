@@ -36,6 +36,7 @@ from .atlas_store import DEFAULT_BANDS, DEFAULT_SUBJECT
 from .frames import hemisphere_frames, separate_coincident
 from .joint import antisymmetric
 from .ladder import vertex_areas
+from .tower import FRAME_LEVEL, period_s
 from .ladder import surface_ladder
 from .trees import HEMIS, Template, Tree, _unit
 from .vectors import Frames, levi_civita
@@ -163,9 +164,7 @@ class DefaultSubjectWriter:
 
     def csr(self, node: str, rows: int, cols: int, row_of: np.ndarray, col_of: np.ndarray, **cols_):
         order = np.lexsort((col_of, row_of))
-        indptr = np.zeros(rows + 1, np.int64)
-        np.add.at(indptr, row_of[order] + 1, 1)
-        indptr = np.cumsum(indptr)
+        indptr = np.r_[0, np.cumsum(np.bincount(row_of, minlength=rows))].astype(np.int64)
         return self.sub.operator(name=node, path=node, layout="csr", n_rows=int(rows), n_cols=int(cols), nnz=int(len(row_of)),
                                  sparse={"indptr": indptr.astype(np.int32 if indptr[-1] < 2**31 else np.int64),
                                          "indices": col_of[order].astype(np.int32), "data": np.ones(len(row_of), np.float32)}, **cols_)
@@ -176,7 +175,7 @@ def build_default_subject(dataset_dir: str | Path, templates_dir: str | Path, *,
                           hcp_trk: str | Path | None = None, hcp_bst_dir: str | Path | None = None,
                           gate_mm: float = 5.0, lc_levels: tuple[int, ...] = (4, 6),
                           connectome_levels: tuple[int, ...] = (2, 4, 6, 8), fibre_points: int = 64,
-                          depth: int = 8, frame_s: float = 0.25, log=print) -> dict:
+                          depth: int = 8, frame_level: int = FRAME_LEVEL, log=print) -> dict:
     """The dataset's ``@default_subject`` — one composition into the dataset (``<datastore>/<dataset>``)."""
     from ..crud import open_dataset
     T = Path(templates_dir)
@@ -188,14 +187,14 @@ def build_default_subject(dataset_dir: str | Path, templates_dir: str | Path, *,
         with sub.composition():
             out = _compose(DefaultSubjectWriter(sub, log), fs0, T, default=default, options=options, hcp_trk=hcp_trk, hcp_bst_dir=hcp_bst_dir,
                            gate_mm=gate_mm, lc_levels=lc_levels, connectome_levels=connectome_levels, fibre_points=fibre_points,
-                           depth=depth, frame_s=frame_s, log=log)
+                           depth=depth, frame_level=frame_level, log=log)
         return {"store": str(sub.store), "id": sub.id, **out}
     finally:
         ds.close()
 
 
 def _compose(W: DefaultSubjectWriter, fs0: Path, T: Path, *, default, options, hcp_trk, hcp_bst_dir, gate_mm, lc_levels,
-             connectome_levels, fibre_points, depth, frame_s, log) -> dict:
+             connectome_levels, fibre_points, depth, frame_level, log) -> dict:
     sub = W.sub
     # ── the default resolution: surfaces, parcellations, the group tree, frames, connection ──
     sph_parts = _read_hemis(fs0, "sphere.reg")
@@ -246,8 +245,9 @@ def _compose(W: DefaultSubjectWriter, fs0: Path, T: Path, *, default, options, h
                                                "gauge": "vector-heat log map from the north pole", "domain": "sphere", "hemispheres": fmeta}))
     # the tiles, carrying the dataset's default atlas DEFINITIONS (D131: never a dataset attribute)
     definitions = {"atlas": {"default": True, "tree": "group", "depth": depth, "resolution": default, "frames": frames_id,
-                             "frame_s": frame_s, "frame_level": 0,
-                             "time_levels": "tile of level m = frame_s · 2^(frame_level + m) s — a longer timescale is a coarser level",
+                             "frame_s": period_s(frame_level), "frame_level": frame_level,
+                             "time_levels": "frames are cycles of the day-anchored tower at frame_level (86 400·2^frame_level s); a level-m "
+                                            "tile is tower level frame_level + m — a longer timescale is a coarser level",
                              "bands_hz": [list(b) for b in DEFAULT_BANDS], "lc_levels": list(lc_levels),
                              "trajectory": {"space_level": 4, "time_level": 2}}}
     tiles_id = W.tiles("sources/cortex_pial", pial_id, levels, params=definitions)

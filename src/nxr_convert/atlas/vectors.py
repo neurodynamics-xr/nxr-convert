@@ -28,7 +28,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .frames import face_gradient, face_normals_areas, run_compute
-from .scalars import analytic_bands, leaf_operator
+from .scalars import analytic_bands, frame_index, frame_starts, leaf_operator
 from .trees import Tree
 
 
@@ -106,23 +106,24 @@ def _lc_rotate(sums: dict, c: np.ndarray, s: np.ndarray) -> dict:
 def band_tensor(trees: "Tree | dict[str, Tree]", area: np.ndarray, fr: Frames, kernel3: np.ndarray, data: np.ndarray,
                 sfreq: float, bands: list[tuple[float, float]], frame_s: float = 0.25, chunk_frames: int = 16, good: np.ndarray | None = None,
                 lc: "LeviCivita | dict[str, LeviCivita] | None" = None, lc_levels: tuple[int, ...] = (),
-                progress=None) -> dict:
+                progress=None, codes: np.ndarray | None = None) -> dict:
     """The orientation tensor of each band's cortical current per band × leaf × frame (+ Levi-Civita per level).
 
     ``kernel3`` is [3·V, channels] with rows (x, y, z) per vertex (Brainstorm's free orientation). It is
     projected once onto the frames (K1 = e1·K, K2 = e2·K, Kn = n·K), so each chunk is six real GEMMs; the
     tensor terms are summed per vertex over each frame first, and everything after that (leaf sums, the
     Levi-Civita rotation, node sums) works on [V × frames] — exact, because both are linear. ``trees``
-    (and ``lc``) may be one or {name: …}; every tree is filled from the same projection.
+    (and ``lc``) may be one or {name: …}; every tree is filled from the same projection. ``codes``: the
+    time tile of each sample, as in ``scalars.band_power``.
     """
     from .frames import tangent_basis
     single = isinstance(trees, Tree)
     tset = {"_": trees} if single else dict(trees)
     lcs = {"_": lc} if single else (lc or {})
     V = len(area)
-    spf = int(round(frame_s * sfreq))
     n = data.shape[-1]
-    n_frames = int(np.ceil(n / spf))
+    f_all, spf = frame_index(n, sfreq, frame_s, codes)
+    n_frames = int(f_all[-1]) + 1
     g_all = np.ones(n, bool) if good is None else np.asarray(good, bool)
     K = np.asarray(kernel3, dtype=np.float32)
     if K.shape[0] != 3 * V:
@@ -154,13 +155,10 @@ def band_tensor(trees: "Tree | dict[str, Tree]", area: np.ndarray, fr: Frames, k
         del A                                                      # memory: the record is held once, as Ar / Ai
         for s in range(0, n, step):
             e = min(s + step, n)
-            k0, k1 = s // spf, int(np.ceil(e / spf))
-            pad = k1 * spf - e
+            fi, st = frame_starts(f_all[s:e])        # a frame cut by the chunk edge is completed by the next
 
             def fsum(x):
-                if pad:
-                    x = np.pad(x, ((0, 0), (0, pad)))
-                return x.reshape(len(x), k1 - k0, spf).sum(-1, dtype=np.float64)
+                return np.add.reduceat(x, st, axis=1, dtype=np.float64)
             gm = g_all[s:e].astype(np.float32)
             ar, ai = Ar[:, s:e] * gm, Ai[:, s:e] * gm                  # bad samples → 0
             parts = [Kx @ y for Kx in (K1, K2, Kn) for y in (ar, ai)]       # J1r, J1i, J2r, J2i, Jnr, Jni
@@ -169,15 +167,15 @@ def band_tensor(trees: "Tree | dict[str, Tree]", area: np.ndarray, fr: Frames, k
             for k in tset:
                 M, Mall = ops[k]
                 for key, x in sums.items():
-                    out[k][key][b, :, k0:k1] = M @ x
-                out[k]["total"][b, :, k0:k1] = Mall @ total
+                    out[k][key][b, :, fi] += (M @ x).T
+                out[k]["total"][b, :, fi] += (Mall @ total).T
                 for lvl, (Ml, c, s_) in lc_ops[k].items():
                     for key, x in _lc_rotate(sums, c, s_).items():
-                        lc_out[k][lvl][key][b, :, k0:k1] = Ml @ x
+                        lc_out[k][lvl][key][b, :, fi] += (Ml @ x).T
         if progress:
             progress(b)
     # good samples per frame: a bad sample carries no current and no count, so every sum stays mergeable
-    samples = np.add.reduceat(g_all.astype(np.int64), np.arange(0, n, spf))
+    samples = np.bincount(f_all, weights=g_all, minlength=n_frames).astype(np.int64)
     res = {k: {"tensor": out[k], "lc": lc_out[k], "samples": samples, "spf": spf} for k in tset}
     return res["_"] if single else res
 

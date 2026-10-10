@@ -214,10 +214,9 @@ wheels = [
 
 [[package]]
 name = "nxr-convert"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "." }
 dependencies = [
-    { name = "h5py" },
     { name = "numpy" },
     { name = "pymatreader" },
     { name = "scipy" },
@@ -236,7 +235,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "h5py", specifier = ">=3.16.0" },
     { name = "nibabel", marker = "extra == 'atlas'", specifier = ">=5.4.2" },
     { name = "numpy", specifier = ">=2.5.2" },
     { name = "pymatreader", specifier = ">=1.2.3" },

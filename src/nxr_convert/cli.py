@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ps = sub.add_parser("scan", help="read the protocol's database index as a source view")
     ps.add_argument("root")
-    ps.add_argument("--prefer", choices=["protocol.mat", "sqlite", "walk"], default=None)
+    ps.add_argument("--prefer", choices=["protocol.mat", "walk"], default=None)
     ps.add_argument("--out", default=None, help="write the view here as JSON (default: stdout)")
     ps.add_argument("--summary", action="store_true", help="print counts instead of the whole view")
 

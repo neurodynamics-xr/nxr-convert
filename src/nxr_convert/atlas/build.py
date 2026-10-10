@@ -29,6 +29,7 @@ from ..crud import Subject, jdump, open_dataset, remove_node
 from ..db import drain, remove_folder, verify
 from ..entities import labelling
 from . import joint, rollup, scalars, vectors
+from .tower import FRAME_LEVEL, period_s, recording_placement
 from .atlas_store import ATLAS_MEASURES, default_subject, definition, put
 from .bad_segments import sample_mask
 from .default_subject import load_default_template
@@ -209,11 +210,11 @@ def _bands_partition(sub: Subject, bands: list[tuple[float, float]]) -> str:
 
 def build_subject(dataset_dir: str | Path, subject: str, *, trees: tuple[str, ...] = ("subject", "group"), depth: int | None = None,
                   maps: bool = True, meg: bool = True, kernels: str = "all", bands: list[tuple[float, float]] | None = None,
-                  frame_s: float | None = None, frames_domain: str = "sphere", lc_levels: tuple[int, ...] | None = None,
+                  frame_level: int | None = None, frames_domain: str = "sphere", lc_levels: tuple[int, ...] | None = None,
                   trajectory: tuple[int, int] | None = None, recordings: int | None = None, chunk_frames: int = 4,
                   replace: bool = False, log=print) -> dict:
     """The subject's atlases, as one composition into its dataset (``<datastore>/<dataset>``). ``chunk_frames``: frames
-    projected at a time (memory only — every frame's sums are whole within a chunk). ``replace``: a previous build's rows
+    projected at a time (memory only — a frame cut by a chunk edge is completed by the next chunk). ``replace``: a previous build's rows
     and arrays are removed first; without it a subject that has an atlas is refused."""
     t0 = time.time()
     ds = open_dataset(dataset_dir)
@@ -222,7 +223,10 @@ def build_subject(dataset_dir: str | Path, subject: str, *, trees: tuple[str, ..
         default = default_subject(ds)
         d = definition(ds)
         depth = depth if depth is not None else int(d.get("depth", 8))
-        frame_s = frame_s if frame_s is not None else float(d.get("frame_s", 0.25))
+        # definitions written before the tower convention say frame_level 0 (0.25 s frames): they get the tower's
+        fl = d.get("frame_level")
+        frame_level = frame_level if frame_level is not None else (int(fl) if fl is not None and fl < 0 else FRAME_LEVEL)
+        frame_s = period_s(frame_level)
         bands = bands or [tuple(b) for b in d.get("bands_hz", scalars.octave_bands())]
         lc_levels = tuple(lc_levels if lc_levels is not None else d.get("lc_levels", (4, 6)))
         if trajectory is None:
@@ -244,7 +248,7 @@ def build_subject(dataset_dir: str | Path, subject: str, *, trees: tuple[str, ..
         log(f"{store.subject}: trees {', '.join(f'{k} (depth {t.depth}, finest {t.finest})' for k, t in T.items())}")
         with sub.composition():
             out = _compose(sub, store, T, P, F, area, tpl, default, frames_domain=frames_domain, maps=maps, meg=meg, kernels=kernels,
-                           bands=bands, frame_s=frame_s, lc_levels=lc_levels, trajectory=trajectory, recordings=recordings,
+                           bands=bands, frame_s=frame_s, frame_level=frame_level, lc_levels=lc_levels, trajectory=trajectory, recordings=recordings,
                            chunk_frames=chunk_frames, log=log)
         # a replaced estimate leaves the group fields that summed it (another subject's root) behind its row: re-sync them
         stale = verify(ds.db, ds.root)
@@ -255,7 +259,7 @@ def build_subject(dataset_dir: str | Path, subject: str, *, trees: tuple[str, ..
         ds.close()
 
 
-def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, meg, kernels, bands, frame_s, lc_levels, trajectory,
+def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, meg, kernels, bands, frame_s, frame_level, lc_levels, trajectory,
              recordings, chunk_frames, log) -> dict:
     t1 = time.time()
     fr, runs, fmeta = make_frames(store, frames_domain)
@@ -307,33 +311,45 @@ def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, me
         bands_id = _bands_partition(sub, bands) if recs else None
         for rec in recs:
             frames_id = None
+            raw = None                      # read ONCE a recording, when a kernel first needs it (a raw can be GBs)
             for k in (k for k in ks if k.session == rec.session):
                 n_orient = k.n_vertices // store.n_vertices if k.n_vertices % store.n_vertices == 0 else 0
                 if n_orient not in (1, 3) or not _kernel_selected(kernels, k.method, n_orient):
                     continue
                 t1 = time.time()
                 K = store.array(k.path)
-                data = store.recording_data(rec)[store.kernel_channels(k)]
-                good, badinfo = sample_mask(store, rec)
+                if raw is None:
+                    raw = store.recording_data(rec)
+                    good, badinfo = sample_mask(store, rec)
+                    pl = recording_placement(store.path, rec.name, rec.sfreq, raw.shape[-1])
+                    codes = pl.sample_codes(frame_level)              # the tower tile of every sample (D135, TOWER)
+                    code0 = int(codes[0])
+                ch = store.kernel_channels(k)
+                data = raw if np.array_equal(ch, np.arange(raw.shape[0])) else raw[ch]
                 g = f"atlas/time/{rec.name}__{k.method}_{k.stamp}"
                 orientation = "constrained" if n_orient == 1 else "free"
                 if n_orient == 1:
-                    res = scalars.band_power(T, area, K, data, rec.sfreq, bands, frame_s, chunk_frames=chunk_frames, good=good)
+                    res = scalars.band_power(T, area, K, data, rec.sfreq, bands, chunk_frames=chunk_frames, good=good, codes=codes)
                 else:
-                    res = vectors.band_tensor(T, area, fr, K, data, rec.sfreq, bands, frame_s, chunk_frames=chunk_frames,
+                    res = vectors.band_tensor(T, area, fr, K, data, rec.sfreq, bands, chunk_frames=chunk_frames, codes=codes,
                                               lc=lc, lc_levels=lc_levels, good=good)
                 del data, K
                 samples = next(iter(res.values()))["samples"]
                 n_frames = int(samples.size)
                 put(sub, f"{g}/samples", samples)
-                # the FRAME tiling, closed form on the recording's own time Line (one a recording, shared by its kernels)
+                # the FRAME tiling, closed form on the recording's own time Line (one a recording, shared by its kernels): frame k
+                # is tower tile frame_code0 + k, so frame 0 starts where that tile does (at or before the first sample)
                 if frames_id is None:
+                    origin = rec.origin + code0 * frame_s - (pl.start_s or 0.0)
                     frames_id = sub.selection(
                         name=f"{rec.name} frames {frame_s:g} s", path=None, type="spans", manifold_id=rec.time_id, cell="1",
                         of_field_id=rec.id, session=rec.session, n_elements=rec.n_samples, n_members=n_frames,
-                        description=f"the atlas's time tiles: {n_frames} frames of {frame_s:g} s (frame k's parent is k >> 1)",
-                        params_json=jdump({"tiling": {"origin": rec.origin, "width": frame_s, "hop": frame_s, "count": n_frames},
-                                           "end": rec.origin + n_frames * frame_s, "atlas": {"frame_s": frame_s, "frame_level": 0, "made": True}}))
+                        description=f"the atlas's time tiles: {n_frames} cycles of tower level {frame_level} ({frame_s:g} s), "
+                                    f"frame k is code {code0} + k, a level-m tile code >> m",
+                        params_json=jdump({"tiling": {"origin": origin, "width": frame_s, "hop": frame_s, "count": n_frames},
+                                           "end": origin + n_frames * frame_s,
+                                           "atlas": {"frame_s": frame_s, "frame_level": frame_level, "frame_code0": code0,
+                                                     "anchor": pl.anchor, "start_s": pl.start_s, "made": True}}))
                 # cortex × time, and the SOURCE ESTIMATE on it: no bytes — its reductions are the atlas
                 cortex = sub.db.read("operator", k.id)["to_manifold_id"] or store.surface_row["id"]
                 product = sub.product([cortex, rec.time_id], session=rec.session)
@@ -364,14 +380,14 @@ def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, me
                         power, psi_src = r["tensor"]["total"], r["lc"]
                     sl, tl = trajectory
                     w = scalars.leaf_operator(T[tk], area) @ np.ones(len(area))
-                    path_nodes = joint.peak_trajectory(joint.cell_density(power, w, samples, T[tk].depth, sl, tl))
+                    path_nodes = joint.peak_trajectory(joint.cell_density(power, w, samples, T[tk].depth, sl, tl, code0=code0))
                     om = joint.antisymmetric(lc[tk].omega[sl])
                     trg = f"{tg}/trajectory/L{sl}_T{tl}"
                     put(sub, f"{trg}/node", path_nodes.astype(np.int32))
                     put(sub, f"{trg}/phi", np.stack([joint.transported_angle(pn, om, sl) for pn in path_nodes]))
                     if psi_src is not None:
                         idx = path_nodes[:, None, :]
-                        tt = {key: np.take_along_axis(rollup.time(psi_src[sl][key], tl, axis=2), idx, axis=1)[:, 0, :] for key in ("t11", "t22", "t12r")}
+                        tt = {key: np.take_along_axis(rollup.time(psi_src[sl][key], tl, axis=2, code0=code0), idx, axis=1)[:, 0, :] for key in ("t11", "t22", "t12r")}
                         psi = joint.principal_orientation(tt["t11"], tt["t22"], tt["t12r"])
                         put(sub, f"{trg}/psi", psi)
                         put(sub, f"{trg}/drift", np.stack([joint.orientation_drift(path_nodes[b], psi[b], om, sl) for b in range(len(bands))]))

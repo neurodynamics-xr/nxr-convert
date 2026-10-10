@@ -34,25 +34,12 @@ from typing import Any
 import numpy as np
 
 from .crud import Subject, jdump
-from .matio import load_mat
+from .matio import load_mat, struct_rows
 from .naming import sanitize_node_name, surface_node_name
 
 
 def is_fibers_file(path: str | Path) -> bool:
     return Path(path).name.startswith("tess_fibers")
-
-
-def _scouts(raw: Any) -> list[dict]:
-    """Brainstorm's ``Scouts`` struct array, whatever pymatreader made of it."""
-    if raw is None:
-        return []
-    if isinstance(raw, dict):
-        keys = list(raw)
-        n = len(raw[keys[0]]) if keys and isinstance(raw[keys[0]], list) else 1
-        if n == 1 and not isinstance(raw.get("ConnectFile"), list):
-            return [raw]
-        return [{k: raw[k][i] for k in keys} for i in range(n)]
-    return list(raw)
 
 
 def export_fibers(sub: Subject, fibers_file: str | Path, *, subject: str, cortex_path: str, cortex_file: str | Path,
@@ -97,9 +84,7 @@ def export_fibers(sub: Subject, fibers_file: str | Path, *, subject: str, cortex
     _, nearest = cKDTree(verts).query(ends)
     end_rows = np.concatenate([np.arange(n_f) * n_p, np.arange(n_f) * n_p + (n_p - 1)])   # fibre vertices
     order = np.lexsort((end_rows, nearest))                       # CSR over cortex vertices
-    indptr = np.zeros(len(verts) + 1, dtype=np.int64)
-    np.add.at(indptr, nearest[order] + 1, 1)
-    indptr = np.cumsum(indptr)
+    indptr = np.r_[0, np.cumsum(np.bincount(nearest, minlength=len(verts)))]
     op = f"{name}_ends"
     sub.operator(name=op, path=op, kind="fibre ends", from_manifold_id=fid, to_manifold_id=cortex["id"], layout="csr",
                  n_rows=int(len(verts)), n_cols=int(n_f * n_p), nnz=int(2 * n_f),
@@ -113,12 +98,11 @@ def export_fibers(sub: Subject, fibers_file: str | Path, *, subject: str, cortex
 
     # ---- the connectomes Brainstorm assigned (Scouts(k).Assignment, per atlas) ----
     connectomes = []
-    from .surface import _atlas_list, _scout_list
-    levels_of = {sanitize_node_name(str(e.get("Name", ""))): ["unassigned", *(str(x["Label"]) for x in _scout_list(e.get("Scouts")))]
-                 for e in _atlas_list(load_mat(cortex_file))}
+    levels_of = {sanitize_node_name(str(e.get("Name", ""))): ["unassigned", *(str(x["Label"]) for x in struct_rows(e.get("Scouts"), "Label"))]
+                 for e in struct_rows(load_mat(cortex_file).get("Atlas"), "Name")}
     atlases = sub.find("selection", f"{cortex_path}_atlases")
     families = {r["name"]: r for r in sub.db.all("SELECT * FROM selection WHERE member_of_id = ?", atlases["id"])} if atlases else {}
-    for sc in _scouts(m.get("Scouts")):
+    for sc in struct_rows(m.get("Scouts"), "ConnectFile"):
         asg = np.asarray(sc.get("Assignment"))
         label = str(sc.get("ConnectFile") or sc.get("Label") or "")
         if asg.size == 0 or asg.ndim != 2 or asg.shape[1] != 2 or asg.shape[0] != n_f:

@@ -347,54 +347,55 @@ def write_zarr_json(file: Path, attributes: str) -> None:
     file.write_text(zarr_json_text(doc, attributes), encoding="utf-8")
 
 
-def drain(db: Database, root: str | Path, *, only=None) -> dict[str, list[str]]:
+def drain(db: Database, root: str | Path) -> dict[str, list[str]]:
     """Drain ``sync_job`` against the datastore at ``root`` — ``syncPending`` exactly: pending jobs in id order; an upsert
     writes the node's canonical zarr.json from its view's text (creating the group, and the groups above it, when absent);
-    a delete removes the folder at the job's path; a row with no path re-syncs its subject, whose root carries it."""
+    a delete removes the folder at the job's path; a row with no path re-syncs its subject, whose root carries it.
+
+    A PASS takes the queue as it stands and marks its jobs done in ONE transaction; the subject jobs a pass enqueues
+    (ids above the pass's) are the next pass's. A failure marks its job with the error and raises."""
     out: dict[str, list[str]] = {"written": [], "removed": [], "skipped": []}
     root = Path(root)
 
-    def nxt():
-        jobs = pending_jobs(db)
-        if only is not None:
-            jobs = [j for j in jobs if only(j)]
-        return jobs[0] if jobs else None
+    def sync(job: dict[str, Any]) -> None:
+        if job["op"] == "delete":
+            if job["path"] and (root / job["path"]).exists():
+                remove_folder(root / job["path"])
+            if job["path"]:
+                out["removed"].append(job["path"])
+            return _finish(db, job["id"], None)
+        text = attributes_text(db, job["table_name"], job["row_id"])
+        if text is None:
+            out["skipped"].append(job["row_id"])
+            return _finish(db, job["id"], "row gone before sync")
+        attrs = json.loads(text)
+        if not attrs.get("path"):
+            if attrs.get("subject_id"):
+                db.execute("INSERT INTO sync_job (table_name, row_id, op) SELECT 'subject', ?, 'upsert' WHERE NOT EXISTS "
+                           "(SELECT 1 FROM sync_job j WHERE j.table_name = 'subject' AND j.row_id = ? AND j.op = 'upsert' "
+                           "AND j.done_utc IS NULL)", attrs["subject_id"], attrs["subject_id"])
+            out["skipped"].append(job["row_id"])
+            return _finish(db, job["id"], None)
+        location = location_of_row(db, job["table_name"], attrs)
+        file = root / location / "zarr.json"
+        if not file.exists():
+            ensure_groups(root, location)
+        write_zarr_json(file, text)        # WHOLESALE: the attributes ARE the row
+        out["written"].append(location)
+        _finish(db, job["id"], None)
 
-    job = nxt()
-    while job is not None:
-        try:
-            if job["op"] == "delete":
-                if job["path"] and (root / job["path"]).exists():
-                    remove_folder(root / job["path"])
-                if job["path"]:
-                    out["removed"].append(job["path"])
-                _finish(db, job["id"], None)
-            else:
-                text = attributes_text(db, job["table_name"], job["row_id"])
-                if text is None:
-                    _finish(db, job["id"], "row gone before sync")
-                    out["skipped"].append(job["row_id"])
-                else:
-                    attrs = json.loads(text)
-                    if not attrs.get("path"):
-                        if attrs.get("subject_id"):
-                            db.execute("INSERT INTO sync_job (table_name, row_id, op) SELECT 'subject', ?, 'upsert' WHERE NOT EXISTS "
-                                       "(SELECT 1 FROM sync_job j WHERE j.table_name = 'subject' AND j.row_id = ? AND j.op = 'upsert' "
-                                       "AND j.done_utc IS NULL)", attrs["subject_id"], attrs["subject_id"])
-                        _finish(db, job["id"], None)
-                        out["skipped"].append(job["row_id"])
-                    else:
-                        location = location_of_row(db, job["table_name"], attrs)
-                        file = root / location / "zarr.json"
-                        if not file.exists():
-                            ensure_groups(root, location)
-                        write_zarr_json(file, text)        # WHOLESALE: the attributes ARE the row
-                        out["written"].append(location)
-                        _finish(db, job["id"], None)
-        except Exception as e:
-            _finish(db, job["id"], str(e))
-            raise
-        job = nxt()
+    while jobs := pending_jobs(db):
+        failed: Exception | None = None
+        with db.tx():
+            for job in jobs:
+                try:
+                    sync(job)
+                except Exception as e:
+                    _finish(db, job["id"], str(e))
+                    failed = e
+                    break
+        if failed is not None:
+            raise failed
     return out
 
 

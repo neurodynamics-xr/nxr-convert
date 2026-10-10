@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.1**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.2**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.1 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.2 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -77,7 +77,7 @@ it does not exist yet.
 
 ```bash
 nxr-convert list <protocol>                       # its subjects and conditions, as JSON
-nxr-convert scan <protocol> [--prefer protocol.mat|sqlite|walk] [--out view.json] [--summary]
+nxr-convert scan <protocol> [--prefer protocol.mat|walk] [--out view.json] [--summary]
 ```
 
 ### Converting
@@ -113,7 +113,7 @@ nxr-convert remove  --dataset D --subject S [--node <store path>]   # the subjec
 ```bash
 nxr-convert atlas default-subject <datastore>/<dataset> --templates <FreeSurfer subjects dir> […]
 nxr-convert atlas build  <datastore>/<dataset> --subject S [--replace] […]
-nxr-convert atlas reduce <datastore>/<dataset>
+nxr-convert atlas reduce <datastore>/<dataset> [--from <datastore>/<other dataset> …]   # members of other datasets too
 nxr-convert atlas info   <datastore>/<dataset>
 ```
 

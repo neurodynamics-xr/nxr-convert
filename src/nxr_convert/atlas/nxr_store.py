@@ -153,7 +153,7 @@ class SubjectStore:
         return self.array(k.channels_path).astype(np.int64)
 
     def recording_data(self, r: Recording) -> np.ndarray:
-        return self.array(r.path).astype(np.float32)
+        return self.array(r.path).astype(np.float32, copy=False)
 
     def bad_spans(self, r: Recording) -> tuple[np.ndarray, np.ndarray]:
         """(start s, stop s) of the recording's bad segments — its ``<rec>_bad_segments`` spans (D143); empty when none."""

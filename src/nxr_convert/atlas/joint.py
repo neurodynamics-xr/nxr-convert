@@ -46,11 +46,12 @@ def antisymmetric(omega: np.ndarray) -> np.ndarray:
     return np.angle(z * np.conj(z.T)) / 2
 
 
-def cell_density(power: np.ndarray, w: np.ndarray, samples: np.ndarray, depth: int, level: int, time_level: int) -> np.ndarray:
-    """Power per unit area per sample on every joint cell: [bands, nodes, time tiles]."""
-    P = rollup.time(rollup.space(power, depth, level, axis=1), time_level, axis=2)
+def cell_density(power: np.ndarray, w: np.ndarray, samples: np.ndarray, depth: int, level: int, time_level: int,
+                 code0: int = 0) -> np.ndarray:
+    """Power per unit area per sample on every joint cell: [bands, nodes, time tiles] (tower-aligned by ``code0``)."""
+    P = rollup.time(rollup.space(power, depth, level, axis=1), time_level, axis=2, code0=code0)
     A = rollup.space(w, depth, level)
-    N = rollup.time(samples.astype(np.float64), time_level)
+    N = rollup.time(samples.astype(np.float64), time_level, code0=code0)
     return P / (A[None, :, None] * N[None, None, :])
 
 
