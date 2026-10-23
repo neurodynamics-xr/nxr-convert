@@ -36,6 +36,7 @@ import numpy as np
 from .crud import Subject, jdump
 from .matio import load_mat, struct_rows
 from .naming import sanitize_node_name, surface_node_name
+from .results_map import atlas_regions
 
 
 def is_fibers_file(path: str | Path) -> bool:
@@ -98,10 +99,6 @@ def export_fibers(sub: Subject, fibers_file: str | Path, *, subject: str, cortex
 
     # ---- the connectomes Brainstorm assigned (Scouts(k).Assignment, per atlas) ----
     connectomes = []
-    levels_of = {sanitize_node_name(str(e.get("Name", ""))): ["unassigned", *(str(x["Label"]) for x in struct_rows(e.get("Scouts"), "Label"))]
-                 for e in struct_rows(load_mat(cortex_file).get("Atlas"), "Name")}
-    atlases = sub.find("selection", f"{cortex_path}_atlases")
-    families = {r["name"]: r for r in sub.db.all("SELECT * FROM selection WHERE member_of_id = ?", atlases["id"])} if atlases else {}
     for sc in struct_rows(m.get("Scouts"), "ConnectFile"):
         asg = np.asarray(sc.get("Assignment"))
         label = str(sc.get("ConnectFile") or sc.get("Label") or "")
@@ -109,18 +106,14 @@ def export_fibers(sub: Subject, fibers_file: str | Path, *, subject: str, cortex
             continue
         atlas = label[len(subject) + 1:] if label.startswith(subject + "_") else label
         fam = sanitize_node_name(atlas)
-        if fam not in families:
+        # Brainstorm's assignment is a region INDEX (the scout's row, 1-based; 0 = none); the partition's CODES are its
+        # dictionary's — the index → the scout's name → its code
+        regions = atlas_regions(sub, cortex_path, cortex_file, atlas)
+        if regions is None:
             if progress:
                 progress({"stage": "skipped", "file": p.name, "reason": f"connectome '{label}': no atlas '{fam}' on {cortex_path}"})
             continue
-        member = families[fam]
-        # Brainstorm's assignment is a region INDEX (the scout's row, 1-based; 0 = none); the partition's CODES are its
-        # dictionary's — the index → the scout's name → its code
-        levels = levels_of.get(fam)
-        if levels is None:
-            continue
-        code = {r["name"]: r["code"] for r in sub.db.all("SELECT name, code FROM dictionary_entry WHERE dictionary_id = ?", member["dictionary_id"])}
-        code_of = np.asarray([code[nm] for nm in levels], dtype=np.int64)
+        levels, code_of, rid = regions
         a = asg.astype(np.int64)
         if a.max() >= len(levels) or a.min() < 0:
             raise ValueError(f"{p.name}: {label} assigns region {int(a.max())} of a {len(levels) - 1}-region atlas")
@@ -130,11 +123,6 @@ def export_fibers(sub: Subject, fibers_file: str | Path, *, subject: str, cortex
         np.add.at(C, (a[:, 0], a[:, 1]), 1)
         off = a[:, 0] != a[:, 1]
         np.add.at(C, (a[off, 1], a[off, 0]), 1)
-        reg = f"{cortex_path}_{fam}_regions"
-        have = sub.find("manifold", reg)
-        rid = have["id"] if have else sub.manifold(
-            name=reg.rsplit("/", 1)[-1], path=reg, type="points", n_vertices=n_codes, topology={"kind": "none", "rank": 0},
-            partition_id=member["id"], comment=f"the {fam} regions of {cortex_path.split('/')[-1]} — element k is code k (0 = unassigned)")
         sub.field(name=f"{name}_connectome_{fam}", path=f"sources/{name}_connectome_{fam}", kind="connectome",
                   manifold_id=sub.product([rid, rid], session=None), data=C.astype(np.float32), unit="streamlines",
                   description=f"streamline counts between {fam} regions; row/col 0 = an unassigned end", source=p.name,

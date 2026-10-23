@@ -93,3 +93,13 @@ def test_a_misaligned_write_is_refused(tmp_path):
     tee = grid.EnvelopeTee(populate_array(tmp_path / "rec"), tmp_path / "env")
     with pytest.raises(ValueError):
         tee[:, 0:100] = np.zeros((2, 100), np.float32)                     # ends mid-window, not at the end
+
+
+def test_a_recording_row_states_the_CHUNK_never_the_shard():
+    """THE CHUNK AND THE SHARD (2026-10-20): the row's ``chunk_shape_json`` is the inner chunk [1 × 2^15] — the unit the app loads — and the
+    stored array's chunk grid is the shard [C × 2^17]. The TypeScript writers take the same (``backend/src/db/chunk.ts``)."""
+    import json
+    meta = grid.recording_meta(328, 360000)
+    assert json.loads(meta.row()["chunk_shape_json"]) == [1, grid.RAW_CHUNK] == [1, 1 << 15]
+    assert meta.doc()["chunk_grid"]["configuration"]["chunk_shape"] == [328, grid.BLOCK] == [328, 1 << 17]
+    assert grid.BLOCK // grid.RAW_CHUNK == 4

@@ -11,6 +11,10 @@
     nxr-convert surface  --dataset D --subject S --file tess_*.mat … [--bst-root P]  add surfaces
     nxr-convert mri      --dataset D --subject S --anat <anat dir> [--only N …]      add MRI volumes
     nxr-convert inverse  --dataset D --subject S --file results_*KERNEL*.mat --session C --bst-root P [--channels-id …]
+    nxr-convert hodge    --dataset D --subject S --from <nsp rheome-hodge-dirac dir> [--nsp-subject S] [--replace]
+                                                                                      add the Hodge–Dirac eigenmodes (``hodge.py``)
+    nxr-convert map      --dataset D --subject S --file results_*.mat|matrix_*.mat … --bst-root P [--session C]
+                                                                                      add static maps (surface or region)
     nxr-convert remove   --dataset D --subject S [--node PATH]                      delete a subject, or one node of it
     nxr-convert list <protocol> | scan <protocol>                                     what a protocol holds
     nxr-convert atlas default-subject | build | reduce | info                         the dyadic atlas (``atlas/cli.py``)
@@ -126,6 +130,22 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--forward-id", default=None)
     pi.add_argument("--name", default=None)
     pi.add_argument("--channel-file", default=None)
+
+    ph = sub.add_parser("hodge", help="add the Hodge-Dirac eigenmode package (nsp rheome-hodge-dirac outputs) to a subject's "
+                        "primary cortex; refused if present unless --replace")
+    ph.add_argument("--dataset", required=True)
+    ph.add_argument("--subject", required=True)
+    ph.add_argument("--from", dest="src", required=True, help="the folder holding <sub>_hodge_mu/modes/mass.npy, _glued_*, _idt_F, _hodge.json")
+    ph.add_argument("--nsp-subject", default=None, help="the file prefix there, when it is not the subject's name")
+    ph.add_argument("--replace", action="store_true")
+
+    pmap = sub.add_parser("map", help="add static maps to a subject: a source map (results_*.mat, one value per vertex of its "
+                          "SurfaceFile) or a region map (matrix_*.mat from scout extraction, one value per region of its Atlas)")
+    pmap.add_argument("--dataset", required=True)
+    pmap.add_argument("--subject", required=True)
+    pmap.add_argument("--file", required=True, nargs="+")
+    pmap.add_argument("--bst-root", required=True)
+    pmap.add_argument("--session", default=None)
 
     pr = sub.add_parser("remove", help="delete a subject, or one node of it (by its store-relative path)")
     pr.add_argument("--dataset", required=True)
@@ -247,6 +267,22 @@ def _run(a) -> int:
                                    surface_id=a.surface_id, forward_id=a.forward_id, name=a.name, channel_file=a.channel_file,
                                    progress=_print)
             _print({"stage": "result", **info})
+        elif a.cmd == "hodge":
+            from .hodge import add_hodge
+            with sub.composition():
+                info = add_hodge(sub, a.src, sub=a.nsp_subject, replace=a.replace)
+            _print({"stage": "result", **info})
+        elif a.cmd == "map":
+            from .results_map import export_map
+            with sub.composition():
+                wrote = []
+                for f in a.file:
+                    if not Path(f).is_file():
+                        raise FileNotFoundError(f"not a file: {f}")
+                    info = export_map(sub, f, bst_root=a.bst_root, session=a.session)
+                    wrote.append(info["name"])
+                    _print({"stage": "map", **{k: v for k, v in info.items() if k != "id"}})
+            _print({"stage": "result", "maps": wrote})
         elif a.cmd == "remove":
             if a.node is None:
                 remove_node(ds.db, ds.root, "subject", sub.id)

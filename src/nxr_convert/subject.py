@@ -225,8 +225,11 @@ def convert_subject(ds: Dataset, root: str | Path, subject: str, *, emit: Emit) 
 
 def convert_template(ds: Dataset, root: str | Path, *, surfaces: list[str] | None = None, emit: Emit) -> dict[str, Any]:
     """The protocol's default anatomy (``anat/@default_subject``) as the dataset's TEMPLATE subject (D55/D127): every
-    low-resolution cortex (pial first, the primary — a group result or a subject's kernel may sit on any) and its images."""
+    low-resolution cortex (pial first, the primary — a group result or a subject's kernel may sit on any), its images,
+    and the STATIC MAPS on it (``results_map.template_map_files``: surface maps on any of its surfaces — fsLR32k,
+    fsaverage — and region maps on its atlases), a map that cannot convert reported and skipped."""
     from .mri import import_subjectimages
+    from .results_map import export_map, template_map_files
     from .surface import export_surface
     root = Path(root)
     src = root / "anat" / "@default_subject"
@@ -244,7 +247,18 @@ def convert_template(ds: Dataset, root: str | Path, *, surfaces: list[str] | Non
             names.append(info["name"])
             emit({"stage": "surface", **{x: y for x, y in info.items() if x != "id"}})
         vols = import_subjectimages(sub, src, None, progress=emit)
-    return {"id": sub.id, "surfaces": names, "volumes": [v["name"] for v in vols]}
+        maps, skipped = [], []
+        for mf in template_map_files(root):
+            mark = sub.mark()
+            try:
+                info = export_map(sub, mf, bst_root=root, session=None)
+                maps.append(info["name"])
+                emit({"stage": "map", **{x: y for x, y in info.items() if x != "id"}})
+            except (ValueError, FileNotFoundError) as e:
+                sub.rollback_to(mark)
+                skipped.append({"what": mf.name, "reason": str(e)})
+                emit({"stage": "skipped", "what": mf.name, "reason": str(e)})
+    return {"id": sub.id, "surfaces": names, "volumes": [v["name"] for v in vols], "maps": maps, "skipped": skipped}
 
 
 def convert_group(ds: Dataset, root: str | Path, *, emit: Emit) -> dict[str, Any]:

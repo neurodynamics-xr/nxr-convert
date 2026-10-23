@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.3**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.4**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.3 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.4 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -98,6 +98,13 @@ nxr-convert group    <protocol> --dataset <datastore>/<dataset>
 
 `<protocol>` is the Brainstorm protocol folder, the one that holds `anat/` and `data/`.
 
+`template` also converts the **static maps** on the default anatomy: every `results_*.mat` source map (one value per
+vertex) and every `matrix_*.mat` region map (scout extraction: one value per region of its `Atlas`) in `data/@default_study`,
+`data/@inter` or a `data/Group_analysis` condition whose `SurfaceFile` is a `@default_subject` surface. A map on a surface
+the template does not export itself (fsLR32k, fsaverage) brings that surface as a secondary one. A region map is a Field
+on the atlas's regions (element k is the region coded k; NaN where the file gives no value). Time-resolved maps are
+reported and skipped.
+
 ### Adding to or removing from a subject
 
 ```bash
@@ -105,8 +112,18 @@ nxr-convert surface --dataset D --subject S --file tess_*.mat [tess_*.mat …] [
 nxr-convert mri     --dataset D --subject S --anat <protocol>/anat/<subject> [--only NAME …]
 nxr-convert inverse --dataset D --subject S --file results_*KERNEL*.mat --session C --bst-root <protocol> \
     [--channels-id ID] [--surface-id ID] [--forward-id ID] [--name N] [--channel-file F]
+nxr-convert map     --dataset D --subject S --file results_*.mat|matrix_*.mat … --bst-root <protocol> [--session C]
+nxr-convert hodge   --dataset D --subject S --from <dir> [--nsp-subject S] [--replace]
 nxr-convert remove  --dataset D --subject S [--node <store path>]   # the subject, or one node of it
 ```
+
+`hodge` adds the Hodge–Dirac eigenmodes of the subject's primary cortex from a solve's outputs in `<dir>`
+(`<S>_hodge_mu/_modes/_mass.npy`, `<S>_glued_V/_keep.npy`, `<S>_idt_F.npy`, `<S>_hodge.json`; the solve is on the two
+hemispheres glued into one closed surface). It is stored like every eigenbasis (no schema change): the axis
+`eigen/hodgeDirac` (μ > 0 in 1/m), its `eigen/hodgeDirac_kind` (0 exact · 2 coexact), the operator
+`hodgeDirac_eigenvectors` [V × K] holding one vertex potential per mode (A = ψ/√2 or S = ⟨χ/√2, ω_v⟩; the 1-form is
+(∇A + n × ∇S)/μ), and the Selection `hodgeDirac_support` (the vertices the glued surface keeps). The solved vertices must
+sit at the primary cortex's positions (1 µm). `--replace` re-adds it.
 
 ### The atlas (optional)
 

@@ -3,7 +3,12 @@
     <channels>          Manifold  points — its node IS its positions array [M, 3] f32, scs metres
     <channels>_names    Selection a partition, one code per channel, read with the subject's ``<channels>_names`` dictionary
     <channels>_labels   Selection a set of partitions: type · unit · hemisphere · lobe · quality, each read with the app-wide
-                                  dictionary of that family (its colours the app's, D111)
+                                  dictionary of that family (its colours the app's, D111), and ``group`` — the electrode
+                                  (an sEEG shaft, an ECoG grid: ``Channel.Group``), read with the subject's
+                                  ``<channels>_group`` dictionary — when any channel names one
+    <channels>_contact1 Field     vector3 [M, 3] f32 scs metres — a BIPOLAR channel's two contacts (``Loc`` with two
+    <channels>_contact2 Field     columns on an electrode channel), the manifold's position their midpoint; a monopolar
+                                  channel's contacts are both its position. Written only when a channel is bipolar.
 
 Units are a property of the CHANNEL, not the timeseries — hence the ``unit`` family. ``hemisphere`` and ``lobe`` are the
 anatomy CTF puts in a channel name (``M<L|R|Z><C|F|O|P|T>nn``); a name that does not parse gets ``-``. ``quality`` is the
@@ -44,10 +49,20 @@ def export_sensors(sub: Subject, channel_mat: dict, channel_flag: np.ndarray, *,
     types = [str(c["Type"]) for c in channels]
     units = channel_units_for_types(types)
     loc = np.full((len(channels), 3), np.nan, dtype=np.float64)
+    contacts = np.full((len(channels), 2, 3), np.nan, dtype=np.float64)
+    bipolar = 0
     for i, c in enumerate(channels):
         l = np.asarray(c.get("Loc")) if c.get("Loc") is not None else None
         if l is not None and l.size:
-            loc[i] = l.reshape(3, -1)[:, 0]        # first coil position
+            cols = l.reshape(3, -1)
+            if cols.shape[1] == 2 and not types[i].strip().upper().startswith("MEG"):
+                contacts[i] = cols.T                # a bipolar pair: both contacts, the channel at their midpoint
+                bipolar += 1
+                loc[i] = cols.mean(axis=1)
+            else:
+                contacts[i] = cols[:, 0]
+                loc[i] = cols[:, 0]                 # first coil position
+    groups = [c["Group"].strip() if isinstance(c.get("Group"), str) else "" for c in channels]
     modalities = list(dict.fromkeys(types))
     n = len(names)
     path = f"timeseries/{name}"
@@ -58,8 +73,16 @@ def export_sensors(sub: Subject, channel_mat: dict, channel_flag: np.ndarray, *,
     sub.manifold(id=mid, name=name, path=path, type="points", n_vertices=n, session=session,
                  topology={"kind": "none", "rank": 0}, geometry={"form": "stored", "cs_key": "scs", "positions_path": path},
                  producer_json=jdump({"modalities": modalities, "channel_units_source": "derived-from-type",
+                                      **({"positions": "bipolar channels at the midpoint of Loc's two contacts "
+                                                       f"(both: {name}_contact1/2)", "bipolar": bipolar} if bipolar else {}),
                                       **({"source_sha1": source_sha1} if source_sha1 else {})}),
                  populate=lambda at: sub.write_array(path, pos, table="manifold", id=mid))
+
+    if bipolar:
+        for k in (0, 1):
+            sub.field(name=f"{name}_contact{k + 1}", path=f"{path}_contact{k + 1}", kind="contact position", manifold_id=mid,
+                      value_type="vector3", data=contacts[:, k].astype(np.float32), unit="m", session=session,
+                      description=f"contact {k + 1} of each bipolar channel (Loc column {k + 1}), scs metres")
 
     # THE NAMES — one level per channel, the subject's own dictionary
     labelling(sub, f"{path}_names", np.arange(n), names, manifold_id=mid, dictionary=f"{name}_names", scope="subject",
@@ -76,10 +99,14 @@ def export_sensors(sub: Subject, channel_mat: dict, channel_flag: np.ndarray, *,
         codes, levels = _family(parsed)
         if len(levels) > 1:
             families.append((fam, codes, levels, None))
+    if any(groups):
+        codes, levels = _family([g or "-" for g in groups])
+        families.append(("group", codes, levels, None))
     flags = np.asarray(channel_flag).ravel() if channel_flag is not None and np.size(channel_flag) else None
     if flags is not None and flags.size == n:
         codes, levels, colors = flag_levels(flags)
         families.append(("quality", codes, levels, np.array(colors, dtype=np.uint8)))
     label_set(sub, f"{path}_labels", [(f, np.asarray(c), l, col) for f, c, l, col in families], manifold_id=mid, session=session,
+              dictionary=lambda fam: (f"{name}_group", "subject") if fam == "group" else (fam, "app"),
               description="the montage families — " + ", ".join(f[0] for f in families))
-    return {"name": name, "id": mid, "n_channels": n, "modalities": modalities, "names": names}
+    return {"name": name, "id": mid, "n_channels": n, "modalities": modalities, "names": names, "bipolar": bipolar}
