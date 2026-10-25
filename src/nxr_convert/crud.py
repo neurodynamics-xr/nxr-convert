@@ -429,12 +429,15 @@ def populate_array(at: Path, data: np.ndarray | None = None, *, dense: bool = Fa
 def _space_spec(key: str) -> tuple[str, str, str, Any, list[dict]]:
     """(space name, geometry, description, parameters, the systems it is created with — reference first) for a key, and
     the system the key names among them: ``spacesFor`` of ``database.ts``."""
-    if key in ("scs", "ncs", "mni") or key.startswith("voxel:"):
+    if key in ("scs", "ncs", "mni", "freesurfer-tkr") or key.startswith("voxel:"):
         systems = [{"key": "scs", "name": "scs", "unit": "m", "reference": True,
                     "description": "Brainstorm's subject coordinate system: origin between the ears, x toward the nasion"}]
         if key == "ncs":
             systems.append({"key": "ncs", "name": "ncs", "unit": "mm", "transition": "affine",
                             "description": "Brainstorm's normalised coordinate system (AC · PC · IH)"})
+        if key == "freesurfer-tkr":
+            systems.append({"key": key, "name": key, "unit": "m", "transition": "affine",
+                            "description": "FreeSurfer's surface RAS (tkr) in metres, as its own surfaces are stored"})
         if key == "mni":
             systems.append({"key": "mni", "name": "mni", "unit": "mm", "transition": "affine", "description": "MNI template space"})
         if key.startswith("voxel:"):

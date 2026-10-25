@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.5**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.6**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.5 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.6 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -113,7 +113,9 @@ nxr-convert mri     --dataset D --subject S --anat <protocol>/anat/<subject> [--
 nxr-convert inverse --dataset D --subject S --file results_*KERNEL*.mat --session C --bst-root <protocol> \
     [--channels-id ID] [--surface-id ID] [--forward-id ID] [--name N] [--channel-file F]
 nxr-convert map     --dataset D --subject S --file results_*.mat|matrix_*.mat … --bst-root <protocol> [--session C]
-nxr-convert hodge   --dataset D --subject S --from <dir> [--nsp-subject S] [--replace]
+nxr-convert surface --dataset D --subject S --fs-dir <FreeSurfer subject dir> --name cortex_pial [--scs-from tess_*.mat]
+nxr-convert hodge   --dataset D --subject S --from <dir> [--nsp-subject S] [--replace] [--surface NAME]
+nxr-convert interp  --dataset D --subject S --from SRC --to DST [--replace]
 nxr-convert remove  --dataset D --subject S [--node <store path>]   # the subject, or one node of it
 ```
 
@@ -125,6 +127,20 @@ hemispheres glued into one closed surface). It is stored like every eigenbasis (
 `hodgeDirac_eigenvectors` [V × K] holding one vertex potential per mode (A = ψ/√2 or S = ⟨χ/√2, ω_v⟩; the 1-form is
 (∇A + n × ∇S)/μ), and the Selection `hodgeDirac_support` (the vertices the glued surface keeps). The solved vertices must
 sit at the primary cortex's positions (1 µm). `--replace` re-adds it.
+
+0.2.6: `--surface NAME` adds the package of another surface under the same names with `__NAME` after `hodgeDirac`
+(`eigen/hodgeDirac__cortex_pial`, `hodgeDirac__cortex_pial_eigenvectors` …); the primary keeps the plain names. The operator is
+chunked [4096 × 64 modes] and written 64 modes at a time (peak about 0.8 GB at V = 300 000, K = 6000). When the solve's
+`source` and the surface both carry `sha256_lh`/`sha256_rh` they must be equal.
+
+`surface --fs-dir` writes FreeSurfer's `surf/lh.pial` + `rh.pial` (else `.pial.T1`) as ONE secondary surface (lh then rh) in
+`freesurfer-tkr` metres, with the hemisphere components, the `sphere.reg` pair (metres), the `aparc` / `aparc.a2009s` /
+`aparc.DKTatlas` annotations as the atlas set, and the sha256 of every file read in its provenance. `--scs-from` fits and stores
+the tkr → SCS affine (`<name>_scs`) against a Brainstorm surface of the same vertices (refused above 1e-5 m rms).
+
+`interp` writes `<DST>_from_<SRC>`, a csr operator: each DST vertex in barycentric weights of the SRC triangle holding it on
+the registration spheres, within the same hemisphere; it reports row-sum error, minimum weight, share of exact gathers and the
+round trip of a smooth field.
 
 ### The atlas (optional)
 

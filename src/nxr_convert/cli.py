@@ -11,8 +11,12 @@
     nxr-convert surface  --dataset D --subject S --file tess_*.mat … [--bst-root P]  add surfaces
     nxr-convert mri      --dataset D --subject S --anat <anat dir> [--only N …]      add MRI volumes
     nxr-convert inverse  --dataset D --subject S --file results_*KERNEL*.mat --session C --bst-root P [--channels-id …]
-    nxr-convert hodge    --dataset D --subject S --from <nsp rheome-hodge-dirac dir> [--nsp-subject S] [--replace]
-                                                                                      add the Hodge–Dirac eigenmodes (``hodge.py``)
+    nxr-convert surface  --dataset D --subject S --fs-dir <FreeSurfer subject dir> --name N [--scs-from tess_*.mat]
+                                                                                      add FreeSurfer's lh/rh.pial as one surface
+    nxr-convert hodge    --dataset D --subject S --from <nsp rheome-hodge-dirac dir> [--nsp-subject S] [--replace] [--surface NAME]
+                                                                                      add the Hodge–Dirac eigenmodes of the primary
+                                                                                      (or of the named surface, suffixed) (``hodge.py``)
+    nxr-convert interp   --dataset D --subject S --from SRC --to DST [--replace]     the operator DST ← SRC through the spheres (``interp.py``)
     nxr-convert map      --dataset D --subject S --file results_*.mat|matrix_*.mat … --bst-root P [--session C]
                                                                                       add static maps (surface or region)
     nxr-convert remove   --dataset D --subject S [--node PATH]                      delete a subject, or one node of it
@@ -112,8 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     pf = sub.add_parser("surface", help="add Brainstorm tess_*.mat surfaces to a subject")
     pf.add_argument("--dataset", required=True)
     pf.add_argument("--subject", required=True)
-    pf.add_argument("--file", required=True, nargs="+")
+    pf.add_argument("--file", nargs="+", help="tess_*.mat files")
     pf.add_argument("--bst-root", default="")
+    pf.add_argument("--fs-dir", help="a FreeSurfer subject dir: surf/lh|rh.pial + sphere.reg + label/*.annot as ONE surface (--name)")
+    pf.add_argument("--name", default="cortex_pial", help="with --fs-dir: the surface's name")
+    pf.add_argument("--scs-from", default=None, help="with --fs-dir: a tess_*.mat of the same vertices; stores the fitted tkr -> SCS affine")
 
     pm = sub.add_parser("mri", help="add a subject's MRI volumes (subjectimage_*.mat)")
     pm.add_argument("--dataset", required=True)
@@ -140,6 +147,14 @@ def main(argv: list[str] | None = None) -> int:
     ph.add_argument("--from", dest="src", required=True, help="the folder holding <sub>_hodge_mu/modes/mass.npy, _glued_*, _idt_F, _hodge.json")
     ph.add_argument("--nsp-subject", default=None, help="the file prefix there, when it is not the subject's name")
     ph.add_argument("--replace", action="store_true")
+    ph.add_argument("--surface", default=None, help="the surface the solve was on (default: the primary); others get suffixed names")
+
+    pn = sub.add_parser("interp", help="write the interpolation operator DST <- SRC (barycentric on the registration spheres)")
+    pn.add_argument("--dataset", required=True)
+    pn.add_argument("--subject", required=True)
+    pn.add_argument("--from", dest="src", required=True)
+    pn.add_argument("--to", dest="dst", required=True)
+    pn.add_argument("--replace", action="store_true")
 
     pmap = sub.add_parser("map", help="add static maps to a subject: a source map (results_*.mat, one value per vertex of its "
                           "SurfaceFile) or a region map (matrix_*.mat from scout extraction, one value per region of its Atlas)")
@@ -248,9 +263,16 @@ def _run(a) -> int:
         sub = Subject.open(ds, a.subject, created_by=stamp())
         if a.cmd == "surface":
             from .surface import export_surface
+            if bool(a.fs_dir) == bool(a.file):
+                raise SystemExit("surface: give --file tess_*.mat … or --fs-dir")
             with sub.composition():
                 wrote = []
-                for f in a.file:
+                if a.fs_dir:
+                    from .surface import export_freesurfer
+                    info = export_freesurfer(sub, a.fs_dir, name=a.name, scs_from=a.scs_from)
+                    wrote.append(info["name"])
+                    _print({"stage": "surface", **{k: v for k, v in info.items() if k != "id"}})
+                for f in a.file or []:
                     if not Path(f).is_file():
                         raise FileNotFoundError(f"not a file: {f}")
                     info = export_surface(sub, f, bst_root=a.bst_root, primary=False)
@@ -272,7 +294,12 @@ def _run(a) -> int:
         elif a.cmd == "hodge":
             from .hodge import add_hodge
             with sub.composition():
-                info = add_hodge(sub, a.src, sub=a.nsp_subject, replace=a.replace)
+                info = add_hodge(sub, a.src, sub=a.nsp_subject, replace=a.replace, surface=a.surface)
+            _print({"stage": "result", **info})
+        elif a.cmd == "interp":
+            from .interp import add_interpolation
+            with sub.composition():
+                info = add_interpolation(sub, a.src, a.dst, replace=a.replace)
             _print({"stage": "result", **info})
         elif a.cmd == "map":
             from .results_map import export_map

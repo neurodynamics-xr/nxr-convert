@@ -14,6 +14,12 @@ cortex (both hemispheres, one closed surface), so there is ONE axis for the unio
 On a closed surface every eigenpair of d + δ with μ ≠ 0 is exact (ψ, dψ/μ, 0)/√2 or coexact (0, δχ/μ, χ)/√2; the −μ partner
 flips the 1-form, so only μ > 0 is kept; the two zero modes (constant 0- and 2-form) are dropped. This is
 ``editor/fixtures/eigenmodes/…/make-hodge-package.py``'s package read off the FULL modes instead of separate LB and Δ₂ solves.
+Each surface carries its OWN basis (``surface=NAME``): the primary under the names above, any other surface under the same
+names with ``__<surface>`` after ``hodgeDirac`` (``eigen/hodgeDirac__cortex_pial``, ``hodgeDirac__cortex_pial_eigenvectors`` …).
+The operator is chunked [4096 vertices × 64 modes] inside one SHARD per 64-mode block (all vertices), so a block of modes reads
+alone and a 300k-vertex basis is ~94 files, not ~7000; it is WRITTEN 64 modes at a time (one shard each) from the
+memory-mapped modes. Peak memory for V = 300 000, K = 6000: about 0.8 GB (a 64-mode block of the 2-form modes in float64,
+~0.3 GB, its vertex potentials ~0.15 GB, the [V × 64] float32 block ~0.08 GB, with copies) — never V × K (7.2 GB float32).
 The full modes (0-|1-|2-forms on the glued intrinsic-Delaunay complex) stay in the nsp derivative: the datastore has no row
 for that complex. The 1-form part is redundant here (it is dA/μ or δS/μ).
 """
@@ -26,12 +32,17 @@ from pathlib import Path
 import numpy as np
 import scipy.sparse as sp
 
-from .crud import Subject, jdump, remove_node, uuid7
+from .crud import Subject, array_meta, jdump, populate_array, remove_node, uuid7
 from .db import now_utc
 
 AXIS = "eigen/hodgeDirac"
-PATHS = (("operator", "hodgeDirac_eigenvectors"), ("field", "eigen/hodgeDirac_kind"), ("selection", "hodgeDirac_support"),
-         ("manifold", AXIS))
+MODE_BLOCK = 64                                          # modes written (and chunked) together
+VERTEX_CHUNK = 4096
+
+
+def _paths(stem: str) -> dict:
+    """The nodes of one surface's package; ``stem`` is ``hodgeDirac`` (the primary) or ``hodgeDirac__<surface>``."""
+    return {"axis": f"eigen/{stem}", "kind": f"eigen/{stem}_kind", "op": f"{stem}_eigenvectors", "support": f"{stem}_support"}
 
 
 def _W(iF: np.ndarray, M2: np.ndarray, nV: int):
@@ -41,14 +52,14 @@ def _W(iF: np.ndarray, M2: np.ndarray, nV: int):
     return sp.diags(1 / np.maximum(np.asarray(inc.sum(1)).ravel(), 1)) @ inc @ sp.diags(M2)
 
 
-def package(d: str | Path, sub: str) -> dict:
+def package(d: str | Path, sub: str, lazy: bool = False) -> dict:
     """Read nsp's ``<sub>_hodge_*`` outputs and derive the vertex-potential package (glued vertex indexing).
 
     Two layouts, found by which files exist: the OLD one (``_hodge_modes.npy``, every mode a full form [K × (nV+nE+nF)]) and
     nsp's SPLIT K=6000 one (``_hodge_exact_modes.npy`` [n0 × nV] and ``_hodge_coexact_modes.npy`` [n2 × nF], with λ each)."""
     d = Path(d)
     if (d / f"{sub}_hodge_exact_modes.npy").exists():
-        return _package_split(d, sub)
+        return _package_split(d, sub, lazy)
     ld = lambda n: np.load(d / f"{sub}_{n}.npy")
     meta = json.loads((d / f"{sub}_hodge.json").read_text())
     nV, nE, nF = (int(meta["hodge"][k]) for k in ("nV", "nE", "nF"))
@@ -68,12 +79,14 @@ def package(d: str | Path, sub: str) -> dict:
     W = _W(iF, M[nV + nE:], nV)
     P = np.where((kind == 0)[:, None], X[:, :nV], (W @ X[:, nV + nE:].T).T)   # [K × nV], ψ/√2 already in the modes
     o = np.argsort(mu, kind="stable")
-    return {"mu": mu[o], "kind": kind[o], "potentials": P[o], "keep": keep, "meta": meta, "mixing": mixing,
-            "glued_V": ld("glued_V")}
+    P = P[o]
+    return {"mu": mu[o], "kind": kind[o], "potentials": P, "block": lambda k0, k1: P[k0:k1].T, "keep": keep, "meta": meta,
+            "mixing": mixing, "glued_V": ld("glued_V")}
 
 
-def _package_split(d: Path, sub: str, chunk: int = 32) -> dict:
-    """The split layout. Modes are memmapped and read ``chunk`` rows at a time (the files are GBs); potentials are float32."""
+def _package_split(d: Path, sub: str, lazy: bool = False) -> dict:
+    """The split layout. Modes are memmapped (the files are GBs) and read ``block(k0, k1)`` at a time; ``lazy`` leaves
+    ``potentials`` ([K × nV] float32, all of them) unbuilt."""
     ld = lambda n, **k: np.load(d / f"{sub}_{n}.npy", **k)
     meta = json.loads((d / f"{sub}_hodge.json").read_text())
     nV, nE, nF = (int(meta["hodge"][k]) for k in ("nV", "nE", "nF"))
@@ -90,48 +103,74 @@ def _package_split(d: Path, sub: str, chunk: int = 32) -> dict:
     use = np.where(mu_all > 1e-6 * mu_all.max())[0]
     o = use[np.argsort(mu_all[use], kind="stable")]
     mu, kind = mu_all[o], np.where(o < lam[0].size, 0, 2).astype(np.uint8)
-    dest = np.full(lam_all.size, -1)
-    dest[o] = np.arange(o.size)
     # the merged ladders must be nsp's own μ (its positive ± pairs)
     ref = np.sort(ld("hodge_mu").ravel())
     ref = ref[ref > 1e-6 * np.abs(ref).max()]
     if ref.size != mu.size or not np.allclose(ref, mu, rtol=1e-6, atol=0):
         raise ValueError(f"{sub}: the split ladders' √λ do not agree with hodge_mu ({mu.size} vs {ref.size} positive modes)")
     W = _W(iF, M[nV + nE:], nV)
-    P = np.zeros((mu.size, nV), np.float32)
-    for arr, w, base, n, name in ((ex, M[:nV], 0, nV, "exact"), (co, M[nV + nE:], lam[0].size, nF, "coexact")):
-        scale = None
-        for i in range(0, arr.shape[0], chunk):
-            X = np.asarray(arr[i:i + chunk], dtype=np.float64)
+    srcs = {"exact": (ex, M[:nV], 0), "coexact": (co, M[nV + nE:], lam[0].size)}
+    scales: dict = {}
+
+    def block(k0: int, k1: int) -> np.ndarray:
+        """The vertex potentials of merged modes k0:k1, [nV × (k1 − k0)] float32 (read from the memmaps, k1 − k0 rows a time)."""
+        src, out = o[k0:k1], np.zeros((nV, k1 - k0), np.float32)
+        for name, (arr, w, base) in srcs.items():
+            sel = np.where((src >= base) & (src < base + arr.shape[0]) if name == "coexact" else (src < lam[0].size))[0]
+            if not sel.size:
+                continue
+            X = np.asarray(arr[src[sel] - base], dtype=np.float64)
             nrm = (X ** 2 * w).sum(1)
-            if scale is None:                               # the normalisation is read off the data, not assumed
-                scale = 1 / np.sqrt(2) if abs(nrm[-1] - 1) < 1e-3 else 1.0 if abs(nrm[-1] - 0.5) < 1e-3 else None
-                if scale is None:
+            if name not in scales:                          # the normalisation is read off the data, not assumed
+                scales[name] = 1 / np.sqrt(2) if abs(nrm[-1] - 1) < 1e-3 else 1.0 if abs(nrm[-1] - 0.5) < 1e-3 else None
+                if scales[name] is None:
                     raise ValueError(f"{sub}: {name} modes have Σ·⋆ = {nrm[-1]:.4g}, neither 1 (ψ) nor 0.5 (ψ/√2)")
-            keep_rows = (base + i + np.arange(X.shape[0]))
-            ok = dest[keep_rows] >= 0                       # skip the zero modes; the rest must all share the norm
-            if np.abs(nrm[ok] * scale ** 2 - 0.5).max(initial=0) > 1e-3:
-                raise ValueError(f"{sub}: {name} modes are not all normalised alike (Σ·⋆ {nrm[ok].min():.4g} … {nrm[ok].max():.4g})")
-            Y = X[ok] if name == "exact" else (W @ X[ok].T).T
-            P[dest[keep_rows[ok]]] = Y * scale
-    return {"mu": mu, "kind": kind, "potentials": P, "keep": keep, "meta": meta, "mixing": 0.0, "glued_V": ld("glued_V")}
+            if np.abs(nrm * scales[name] ** 2 - 0.5).max() > 1e-3:
+                raise ValueError(f"{sub}: {name} modes are not all normalised alike (Σ·⋆ {nrm.min():.4g} … {nrm.max():.4g})")
+            Y = X.T if name == "exact" else W @ X.T
+            out[:, sel] = Y * scales[name]
+        return out
+    for k in {0, int(np.argmax(kind == 2))}:                # both normalisations are checked now, not mid-write
+        block(k, k + 1)
+    pk = {"mu": mu, "kind": kind, "block": block, "keep": keep, "meta": meta, "mixing": 0.0, "glued_V": ld("glued_V")}
+    if not lazy:
+        pk["potentials"] = block(0, mu.size).T
+    return pk
 
 
-def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: bool = False, tol_m: float = 1e-6) -> dict:
-    """Add (or with ``replace`` re-add) the Hodge–Dirac package from nsp's outputs in ``d`` to the subject's PRIMARY cortex."""
+def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: bool = False, tol_m: float = 1e-6,
+              surface: str | None = None) -> dict:
+    """Add (or with ``replace`` re-add) the Hodge–Dirac package from nsp's outputs in ``d`` to a surface of the subject:
+    the PRIMARY cortex (``surface=None``, and any name that is the primary), else the named surface under suffixed names."""
     sub = sub or s.row["name"]
-    have = [(t, r) for t, p in PATHS if (r := s.find(t, p))]
+    if surface is None:
+        cx = s.db.one("SELECT m.*, g.positions_path FROM manifold m LEFT JOIN geometry g ON g.id = m.geometry_id "
+                      "WHERE m.subject_id = ? AND m.is_primary = 1", s.id)
+        if cx is None:
+            raise KeyError(f"{s.row['name']}: no primary surface")
+    else:
+        cx = s.db.one("SELECT m.*, g.positions_path FROM manifold m LEFT JOIN geometry g ON g.id = m.geometry_id "
+                      "WHERE m.subject_id = ? AND m.type = 'surface' AND m.name = ?", s.id, surface)
+        if cx is None:
+            have_names = [r["name"] for r in s.db.all("SELECT name FROM manifold WHERE subject_id = ? AND type = 'surface' ORDER BY name", s.id)]
+            raise KeyError(f"{s.row['name']}: no surface named {surface!r}; it has {', '.join(have_names) or 'none'}")
+    stem = "hodgeDirac" if cx["is_primary"] else f"hodgeDirac__{cx['name']}"
+    P_ = _paths(stem)
+    have = [(t, r) for t, p in (("operator", P_["op"]), ("field", P_["kind"]), ("selection", P_["support"]), ("manifold", P_["axis"]))
+            if (r := s.find(t, p))]
     if have and not replace:
-        raise FileExistsError(f"{s.row['name']}: already holds a Hodge–Dirac package ({have[0][1]['path']}); pass --replace")
-    cx = s.db.one("SELECT m.*, g.positions_path FROM manifold m LEFT JOIN geometry g ON g.id = m.geometry_id "
-                  "WHERE m.subject_id = ? AND m.is_primary = 1", s.id)
-    if cx is None:
-        raise KeyError(f"{s.row['name']}: no primary surface")
-    pk = package(d, sub)
+        raise FileExistsError(f"{s.row['name']}: {cx['name']} already holds a Hodge–Dirac package ({have[0][1]['path']}); pass --replace")
+    pk = package(d, sub, lazy=True)
     keep, V = pk["keep"], int(cx["n_vertices"])
     if keep.min() < 0 or keep.max() >= V or np.unique(keep).size != keep.size:
-        raise ValueError(f"{sub}: glued_keep does not index the primary cortex's {V} vertices")
-    # THE SAME SURFACE: the glued vertices are the primary cortex's, at the same positions
+        raise ValueError(f"{sub}: glued_keep does not index {cx['name']}'s {V} vertices")
+    # the same FILES, when both sides say which they are (a FreeSurfer pair: sha256 of lh/rh)
+    src = (pk["meta"].get("source") or {})
+    mine = json.loads(cx["producer_json"] or "{}")
+    for h in ("sha256_lh", "sha256_rh"):
+        if src.get(h) and mine.get(h) and src[h] != mine[h]:
+            raise ValueError(f"{sub}: the solve read a different {h[7:]} than {cx['name']} holds ({src[h][:12]} vs {mine[h][:12]})")
+    # THE SAME SURFACE: the glued vertices are this surface's, at the same positions
     import zarr
     xyz = np.asarray(zarr.open_array(str(s.store / cx["positions_path"]), mode="r")[:], dtype=np.float64)
     err = float(np.abs(xyz[keep] - pk["glued_V"]).max())
@@ -140,8 +179,6 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
     for t, r in have:
         remove_node(s.db, s.root, t, r["id"])
     K = int(pk["mu"].size)
-    E = np.zeros((V, K), np.float32)
-    E[keep] = pk["potentials"].T
     m = pk["meta"]
     prov = {"producer": "nsp rheome-hodge-dirac", "subject": m.get("subject"), "dataset": m.get("dataset"), "job": m.get("job"),
             "rheome_commit": m.get("rheome_commit"), "source": m.get("source"), "glue": {"gap_mm": m.get("glue", {}).get("gap_mm"),
@@ -149,23 +186,34 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
             "hodge_json_sha256": hashlib.sha256((Path(d) / f"{sub}_hodge.json").read_bytes()).hexdigest(), "mixing_max": pk["mixing"]}
     stamp = now_utc(ms=False)
     axis = uuid7()
-    s.manifold(id=axis, name="hodgeDirac", path=AXIS, type="points", n_vertices=K, topology={"kind": "none", "rank": 0},
-                      geometry={"form": "stored", "cs_key": "eigenvalue:hodgeDirac", "positions_path": AXIS},
+    cs = f"eigenvalue:{stem}"
+    where = f"the {cx['name']} vertices"
+    s.manifold(id=axis, name=stem, path=P_["axis"], type="points", n_vertices=K, topology={"kind": "none", "rank": 0},
+                      geometry={"form": "stored", "cs_key": cs, "positions_path": P_["axis"]},
                       derived_from_id=cx["id"], operator="hodgeDirac", producer_json=jdump({"variant": "Hodge-Dirac (d + δ, glued)",
                       "fieldType": "potentials", "kept": "μ > 0", **prov}), created_utc=stamp,
-                      populate=lambda at: s.write_array(AXIS, pk["mu"].astype(np.float64), table="manifold", id=axis))
-    sel = s.selection(name="hodgeDirac_support", path="hodgeDirac_support", type="indices", manifold_id=cx["id"],
+                      populate=lambda at: s.write_array(P_["axis"], pk["mu"].astype(np.float64), table="manifold", id=axis))
+    sel = s.selection(name=f"{stem}_support", path=P_["support"], type="indices", manifold_id=cx["id"],
                       data=keep.astype(np.int32), picked=True,
-                      description="the primary-cortex vertices the glued Hodge–Dirac surface keeps (the medial cut is outside)")
-    s.field(name="hodgeDirac_kind", path="eigen/hodgeDirac_kind", kind="form degree", manifold_id=axis, value_type="integer",
+                      description=f"{where} the glued Hodge–Dirac surface keeps (the medial cut is outside)")
+    s.field(name=f"{stem}_kind", path=P_["kind"], kind="form degree", manifold_id=axis, value_type="integer",
             data=pk["kind"], description="per mode: 0 exact (a 0-form potential A) · 2 coexact (a 2-form potential S)")
-    op = s.operator(name="hodgeDirac_eigenvectors", path="hodgeDirac_eigenvectors", kind="eigenvectors", from_manifold_id=axis,
+
+    def write(at: Path) -> None:                            # MODE_BLOCK modes at a time: [V × K] is never in memory
+        a = populate_array(at)
+        for k0 in range(0, K, MODE_BLOCK):
+            blk = pk["block"](k0, min(K, k0 + MODE_BLOCK))
+            E = np.zeros((V, blk.shape[1]), np.float32)
+            E[keep] = blk
+            a[:, k0:k0 + blk.shape[1]] = E
+    op = s.operator(name=f"{stem}_eigenvectors", path=P_["op"], kind="eigenvectors", from_manifold_id=axis,
                     to_manifold_id=cx["id"], from_value_type="scalar", to_value_type="scalar", layout="dense", n_rows=V, n_cols=K,
-                    data=E, compress=True, created_utc=stamp,
+                    meta=array_meta(np.float32, (V, K), chunks=(min(V, VERTEX_CHUNK), min(K, MODE_BLOCK)), shards=(-(-V // min(V, VERTEX_CHUNK)) * min(V, VERTEX_CHUNK), min(K, MODE_BLOCK)), compress=True),
+                    populate=write, created_utc=stamp,
                     description="Hodge–Dirac modes as vertex potentials: A (exact) or S (coexact) per column; 1-form (∇A + n×∇S)/μ",
                     params_json=jdump({"potentials": "A = ψ/√2 (kind 0) · S = ⟨χ/√2, ω_v⟩ (kind 2)", "support": sel,
                                        "solved": "K x = μ M x, d + δ on the glued intrinsic-Delaunay complex"}),
                     producer_json=jdump(prov))
-    return {"axis": AXIS, "n_modes": K, "n_exact": int((pk["kind"] == 0).sum()), "n_coexact": int((pk["kind"] == 2).sum()),
-            "mu": [float(pk["mu"][0]), float(pk["mu"][-1])], "support": int(keep.size), "of": V, "position_err_m": err,
-            "replaced": bool(have), "operator_id": op}
+    return {"axis": P_["axis"], "surface": cx["name"], "n_modes": K, "n_exact": int((pk["kind"] == 0).sum()),
+            "n_coexact": int((pk["kind"] == 2).sum()), "mu": [float(pk["mu"][0]), float(pk["mu"][-1])], "support": int(keep.size),
+            "of": V, "position_err_m": err, "replaced": bool(have), "operator_id": op}
