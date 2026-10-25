@@ -169,6 +169,23 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--subject", required=True)
     pr.add_argument("--node", default=None)
 
+    pq = sub.add_parser("qc", help="sensor QC of a subject's recordings: the PSD Field, its measures and qc_flag, meg-qc's metrics")
+    pq.add_argument("--dataset", required=True)
+    pq.add_argument("--subject", required=True)
+    pq.add_argument("--megqc", default=None, help="meg-qc's <sub>.tar.gz (its session metrics become measurements of the rest runs)")
+    pq.add_argument("--replace", action="store_true")
+    pmg = sub.add_parser("migrate", help="bring a schema-48 shared database into a dataset folder at this schema, every node's "
+                         "zarr.json rewritten from its row (48 → 49 only; an exception to D139)")
+    pmg.add_argument("--from", dest="src", required=True, help="the old database (nxr.sqlite)")
+    pmg.add_argument("--dataset", required=True, help="<datastore>/<dataset>: its subject stores already extracted here")
+    pfr = sub.add_parser("fragment", help="one subject's writable copy of a shared dataset, for a parallel job (merge folds it back)")
+    pfr.add_argument("--dataset", required=True)
+    pfr.add_argument("--subject", required=True)
+    pfr.add_argument("--to", dest="dst", required=True, help="a folder; the fragment is <to>/<dataset>, the command's --dataset")
+    pme = sub.add_parser("merge", help="fold fragments back into their shared dataset, serially, their nodes resynced")
+    pme.add_argument("--dataset", required=True)
+    pme.add_argument("fragments", nargs="+")
+
     from .atlas.cli import add_parser as _add_atlas_parser
     _add_atlas_parser(sub)
 
@@ -193,6 +210,16 @@ def main(argv: list[str] | None = None) -> int:
             _print({"stage": "scan", "kind": view.kind, "root": view.root, **({"wrote": str(wrote)} if wrote else {}), **view.counts})
         else:
             print(json.dumps(payload, indent=2))
+        return 0
+    if a.cmd in ("migrate", "fragment", "merge"):
+        from . import shared_dataset as sd
+        try:
+            out = (sd.migrate(a.src, a.dataset) if a.cmd == "migrate" else sd.fragment(a.dataset, a.subject, a.dst)
+                   if a.cmd == "fragment" else sd.merge(a.dataset, a.fragments))
+        except Exception as e:  # noqa: BLE001
+            _print({"stage": "error", "message": f"{type(e).__name__}: {e}"})
+            return 1
+        _print({"stage": "result", **out})
         return 0
     try:
         return _run(a)
@@ -295,6 +322,11 @@ def _run(a) -> int:
             from .hodge import add_hodge
             with sub.composition():
                 info = add_hodge(sub, a.src, sub=a.nsp_subject, replace=a.replace, surface=a.surface)
+            _print({"stage": "result", **info})
+        elif a.cmd == "qc":
+            from .qc import add_qc
+            with sub.composition():
+                info = add_qc(sub, megqc=a.megqc, replace=a.replace, progress=_print)
             _print({"stage": "result", **info})
         elif a.cmd == "interp":
             from .interp import add_interpolation

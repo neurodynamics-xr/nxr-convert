@@ -16,7 +16,7 @@ flips the 1-form, so only μ > 0 is kept; the two zero modes (constant 0- and 2-
 ``editor/fixtures/eigenmodes/…/make-hodge-package.py``'s package read off the FULL modes instead of separate LB and Δ₂ solves.
 Each surface carries its OWN basis (``surface=NAME``): the primary under the names above, any other surface under the same
 names with ``__<surface>`` after ``hodgeDirac`` (``eigen/hodgeDirac__cortex_pial``, ``hodgeDirac__cortex_pial_eigenvectors`` …).
-The operator is chunked [4096 vertices × 64 modes] inside one SHARD per 64-mode block (all vertices), so a block of modes reads
+The operator is chunked ONE MODE a chunk [all vertices × 1] inside one SHARD per 64-mode block, so a selected mode reads
 alone and a 300k-vertex basis is ~94 files, not ~7000; it is WRITTEN 64 modes at a time (one shard each) from the
 memory-mapped modes. Peak memory for V = 300 000, K = 6000: about 0.8 GB (a 64-mode block of the 2-form modes in float64,
 ~0.3 GB, its vertex potentials ~0.15 GB, the [V × 64] float32 block ~0.08 GB, with copies) — never V × K (7.2 GB float32).
@@ -36,8 +36,7 @@ from .crud import Subject, array_meta, jdump, populate_array, remove_node, uuid7
 from .db import now_utc
 
 AXIS = "eigen/hodgeDirac"
-MODE_BLOCK = 64                                          # modes written (and chunked) together
-VERTEX_CHUNK = 4096
+MODE_BLOCK = 64                                          # modes written together, one shard each; the chunk is one mode
 
 
 def _paths(stem: str) -> dict:
@@ -208,7 +207,7 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
             a[:, k0:k0 + blk.shape[1]] = E
     op = s.operator(name=f"{stem}_eigenvectors", path=P_["op"], kind="eigenvectors", from_manifold_id=axis,
                     to_manifold_id=cx["id"], from_value_type="scalar", to_value_type="scalar", layout="dense", n_rows=V, n_cols=K,
-                    meta=array_meta(np.float32, (V, K), chunks=(min(V, VERTEX_CHUNK), min(K, MODE_BLOCK)), shards=(-(-V // min(V, VERTEX_CHUNK)) * min(V, VERTEX_CHUNK), min(K, MODE_BLOCK)), compress=True),
+                    meta=array_meta(np.float32, (V, K), chunks=(V, 1), shards=(V, min(K, MODE_BLOCK)), compress=True),
                     populate=write, created_utc=stamp,
                     description="Hodge–Dirac modes as vertex potentials: A (exact) or S (coexact) per column; 1-form (∇A + n×∇S)/μ",
                     params_json=jdump({"potentials": "A = ψ/√2 (kind 0) · S = ⟨χ/√2, ω_v⟩ (kind 2)", "support": sel,

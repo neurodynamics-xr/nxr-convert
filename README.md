@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.6**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.7**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.6 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.7 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -133,6 +133,18 @@ sit at the primary cortex's positions (1 µm). `--replace` re-adds it.
 chunked [4096 × 64 modes] and written 64 modes at a time (peak about 0.8 GB at V = 300 000, K = 6000). When the solve's
 `source` and the surface both carry `sha256_lh`/`sha256_rh` they must be equal.
 
+0.2.7: the operator is chunked ONE MODE a chunk ([V × 1]) inside one shard per 64 modes, so reading modes i..j decodes
+only those modes (a basis written by 0.2.6 is re-added with `--replace` to get it).
+
+`qc` adds sensor QC to every recording of a subject: the PSD Field `frequency/<rec>_psd_preprocessed` (Welch, 4 s Hann,
+50 % overlap, one-sided density, every channel, on channels × a 0.25 Hz frequency Line; `label` = `preprocessed`), and
+measurements of it on the recording's channel `_names` selection — per MEG channel and per recording (the median over good
+MEG channels): `line_residual_db`, `muscle_power`, `muscle_ratio_db`, `alpha_peak_hz`, `alpha_peak_power`,
+`aperiodic_slope`, `channel_status`, `excluded_fraction` and `qc_flag` (0 pass · 1 check · 2 fail), read through the
+dataset's `measure`, `qc flag` (which states the rule) and `channel status` dictionaries. `--megqc <sub>.tar.gz` adds the
+meg-qc pipeline's session metrics as `megqc_*` measurements of the rest recordings. The `clean` stage (SSP, excluded time)
+is not written yet: `excluded_fraction` is 0 and the PSD's provenance says `"excluded": "none marked"`.
+
 `surface --fs-dir` writes FreeSurfer's `surf/lh.pial` + `rh.pial` (else `.pial.T1`) as ONE secondary surface (lh then rh) in
 `freesurfer-tkr` metres, with the hemisphere components, the `sphere.reg` pair (metres), the `aparc` / `aparc.a2009s` /
 `aparc.DKTatlas` annotations as the atlas set, and the sha256 of every file read in its provenance. `--scs-from` fits and stores
@@ -141,6 +153,28 @@ the tkr → SCS affine (`<name>_scs`) against a Brainstorm surface of the same v
 `interp` writes `<DST>_from_<SRC>`, a csr operator: each DST vertex in barycentric weights of the SRC triangle holding it on
 the registration spheres, within the same hemisphere; it reports row-sum error, minimum weight, share of exact gathers and the
 round trip of a smooth field.
+
+### A shared dataset written by parallel jobs
+
+SQLite takes one writer, so jobs that each add to one subject of a large dataset (on a cluster) write a FRAGMENT and one job
+merges them:
+
+```bash
+nxr-convert fragment --dataset <datastore>/<dataset> --subject <sub> --to <scratch>   # → <scratch>/<dataset>
+nxr-convert hodge|surface|interp|qc|atlas build --dataset <scratch>/<dataset> --subject <sub> …   # arrays land in the real store
+nxr-convert merge --dataset <datastore>/<dataset> <scratch1>/<dataset> <scratch2>/<dataset> …     # serially, one job
+```
+
+A fragment holds its subject's rows and the dataset's shared rows, and links the subject's real store. `merge` replaces each
+fragment's subject in the dataset's database by the fragment's copy, adds shared rows it lacks (a dictionary the dataset
+already has under the same name is the dataset's; the fragment's references move to it), rewrites that subject's nodes'
+`zarr.json` from the merged rows, and removes no folder.
+
+`migrate --from <nxr.sqlite> --dataset <datastore>/<dataset>` brings a schema-48 database (one shared by many subjects,
+written before the dataset layout) into the dataset folder as `dataset.sqlite` at schema 49: the `status` column added
+(`complete`), every view, index and trigger recreated from the schema, then every node's `zarr.json` rewritten from its row
+and the catalog written. The subject stores must already be in the folder; a node missing on disk is reported, not made.
+48 → 49 is the only step it knows.
 
 ### The atlas (optional)
 
