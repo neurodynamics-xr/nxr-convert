@@ -14,8 +14,8 @@ from nxr_convert.db import attributes_text, uuid7
 S48 = Path(__file__).parent / "fixtures" / "schema-48.sql"
 
 
-def subject(ds, name):
-    sub = Subject.create(ds, name, source_format="brainstorm", immediate=True)
+def subject(ds, name, **kw):
+    sub = Subject.create(ds, name, **{"source_format": "brainstorm", **kw}, immediate=True)
     V, F = np.random.default_rng(0).random((4, 3)), np.array([[0, 1, 2], [0, 2, 3]], np.int32)
 
     def arrays(at):
@@ -122,3 +122,20 @@ def test_migrate_48(shared, tmp_path):
     with pytest.raises(RuntimeError, match="user_version 47"):
         c = sqlite3.connect(tmp_path / "x.sqlite"); c.execute("PRAGMA user_version = 47"); c.close()
         sd.migrate(tmp_path / "x.sqlite", tmp_path / "y" / "ds")
+
+
+def test_a_fragment_carries_the_template_read_only(shared, tmp_path):
+    folder, ids = shared
+    with open_dataset(folder) as ds:
+        t, tm, _ = subject(ds, "@default_subject", kind="template", folder="@default_subject.nxr.zarr")
+        before = ds.db.all("SELECT * FROM manifold WHERE subject_id = ? ORDER BY id", t.id)
+    frag = Path(sd.fragment(folder, "sub-01", tmp_path / "frag")["fragment"])
+    assert (frag / "@default_subject.nxr.zarr").is_symlink() and json.loads((frag / "fragment.json").read_text())["templates"] == [t.id]
+    with open_dataset(frag) as ds:
+        assert ds.db.all("SELECT * FROM manifold WHERE subject_id = ? ORDER BY id", t.id) == before
+        assert ds.db.value("SELECT count(*) FROM topology_cell WHERE topology_id = (SELECT topology_id FROM manifold WHERE id = ?)", tm) > 0
+        ds.db.conn.execute("UPDATE manifold SET name = 'changed' WHERE id = ?", (tm,))
+        ds.db.conn.commit()
+    sd.merge(folder, [frag])
+    with open_dataset(folder) as ds:
+        assert ds.db.all("SELECT * FROM manifold WHERE subject_id = ? ORDER BY id", t.id) == before     # never merged back

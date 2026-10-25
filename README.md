@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.8**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.9**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.8 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.9 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -166,7 +166,8 @@ nxr-convert hodge|surface|interp|qc|atlas build --dataset <scratch>/<dataset> --
 nxr-convert merge --dataset <datastore>/<dataset> <scratch1>/<dataset> <scratch2>/<dataset> …     # serially, one job
 ```
 
-A fragment holds its subject's rows and the dataset's shared rows, and links the subject's real store. `merge` replaces each
+A fragment holds its subject's rows, the dataset's shared rows and (0.2.9) its template subjects' rows, read-only, and links
+the subject's and the templates' real stores, so `atlas build` finds the `@default_subject`; `merge` never writes template rows back. `merge` replaces each
 fragment's subject in the dataset's database by the fragment's copy, adds shared rows it lacks (a dictionary the dataset
 already has under the same name is the dataset's; the fragment's references move to it), rewrites that subject's nodes'
 `zarr.json` from the merged rows, and removes no folder.

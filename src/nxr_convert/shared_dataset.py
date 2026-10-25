@@ -10,8 +10,8 @@ is reported and left alone (never a group made in its place).
 
 FRAGMENT / MERGE (SQLite on Lustre takes ONE writer): a parallel job never opens the shared ``dataset.sqlite`` for writing.
 ``nxr-convert fragment --dataset <ds> --subject X --to <root>`` makes ``<root>/<dataset>/dataset.sqlite`` — the subject's rows,
-the shared rows (the dataset's dictionaries, every subject row so references hold) — and links the subject's real store into
-it, so every per-subject command (surface · hodge · interp · atlas build · qc) runs with ``--dataset <root>/<dataset>``: arrays
+the shared rows (the dataset's dictionaries, every subject row so references hold), the TEMPLATE subjects' rows (the
+``@default_subject``, read there and never merged back) — and links the subject's and the templates' real stores into it, so every per-subject command (surface · hodge · interp · atlas build · qc) runs with ``--dataset <root>/<dataset>``: arrays
 land in the real store, rows in the fragment. ``nxr-convert merge --dataset <ds> <root>/<dataset> …`` (ONE job, serially)
 replaces each fragment's subject in the shared database by the fragment's copy, adds shared rows it does not have (a
 dictionary the dataset already holds under the same name is the dataset's: the fragment's references are moved to it), and
@@ -193,8 +193,9 @@ def fragment(folder: str | Path, subject: str, out_root: str | Path) -> dict:
             if t in NEVER or t in CHILD or t in owners:
                 continue
             _insert(conn, t, "1", mode="OR REPLACE" if t == "meta" else "OR IGNORE")    # dataset · datastore · subject · meta · …
+        tpl = conn.execute("SELECT id, path FROM f.subject WHERE kind = 'template'").fetchall()   # read, never merged back
         for t in owners:
-            _insert(conn, t, "subject_id = ? OR subject_id IS NULL", (sid,))
+            _insert(conn, t, "subject_id = ? OR subject_id IS NULL OR subject_id IN (SELECT id FROM f.subject WHERE kind = 'template')", (sid,))
         for t, (col, parent) in CHILD.items():
             _insert(conn, t, f'"{col}" IN (SELECT id FROM main."{parent}")')
         conn.execute("DELETE FROM sync_job")
@@ -202,10 +203,12 @@ def fragment(folder: str | Path, subject: str, out_root: str | Path) -> dict:
     finally:
         conn.execute("DETACH DATABASE f")
         conn.close()
+    for p in [spath] + [p for _, p in tpl]:
+        if (folder / p).exists() and not (frag / p).exists():
+            os.symlink(folder / p, frag / p, target_is_directory=True)
     link = frag / spath
-    if not link.exists():
-        os.symlink(folder / spath, link, target_is_directory=True)
-    (frag / FRAGMENT_FILE).write_text(json.dumps({"subject": subject, "subject_id": sid, "dataset": str(folder)}, indent=2))
+    (frag / FRAGMENT_FILE).write_text(json.dumps({"subject": subject, "subject_id": sid, "dataset": str(folder),
+                                                  "templates": [i for i, _ in tpl]}, indent=2))
     return {"fragment": str(frag), "subject": subject, "store": str(link)}
 
 
