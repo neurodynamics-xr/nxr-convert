@@ -271,6 +271,21 @@ def test_interp_refuses_without_a_sphere_or_hemispheres(sub):
         add_interpolation(sub, "lo", "nope")
 
 
+def test_interp_splits_a_surface_without_components(sub):
+    """A schema-48 surface has no hemisphere components: its two mesh pieces are the hemispheres, left first (+y in scs)."""
+    v, f = _icosphere(1)
+    n = len(v)
+    _two_hemis(sub, "lo", 1, primary=True)
+    for name, ys in (("bare", (0.1, -0.1)), ("flipped", (-0.1, 0.1))):
+        add_surface(sub, name=name, folder="sources", vertices=np.concatenate([v * 0.05 + [0, ys[0], 0], v * 0.05 + [0, ys[1], 0]]),
+                    faces=np.concatenate([f, f + n]), sphere=np.concatenate([v, v]) * 0.1)
+    info = add_interpolation(sub, "bare", "lo")
+    M = _read_csr(sub, "lo_from_bare", (2 * n, 2 * n))
+    assert info["exact_gather_share"] == 1.0 and (M.indices[:n] < n).all() and (M.indices[n:] >= n).all()
+    with pytest.raises(ValueError, match="lies to the right"):
+        add_interpolation(sub, "flipped", "lo")
+
+
 def test_hodge_streams_the_split_layout_in_blocks(sub, tmp_path, monkeypatch):
     """The split layout is written MODE_BLOCK modes at a time and equals the whole-package result (up to each mode's sign)."""
     import nxr_convert.hodge as H

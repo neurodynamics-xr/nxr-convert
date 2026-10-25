@@ -3,7 +3,9 @@
 ``<DST>_from_<SRC>``  Operator  csr [V_DST × V_SRC]: each DST vertex in barycentric weights of the SRC triangle that holds it
                                 ON THE SPHERE (3 weights a row, ≥ 0, summing to 1; a vertex both surfaces share is one 1).
 Both hemispheres lie on the one sphere, so each DST vertex is located among the SAME hemisphere's SRC triangles (the
-hemisphere components ``<name>_1``, ``<name>_2``, matched by label)."""
+hemisphere components ``<name>_1``, ``<name>_2``, matched by label). A surface without them (a schema-48 store) is split into
+its mesh's two connected components, left first, as Brainstorm and FreeSurfer order them; where the coordinate system says
+which way is left (``scs`` +y, ``freesurfer-tkr`` −x), the split must agree with it."""
 from __future__ import annotations
 
 import numpy as np
@@ -12,6 +14,7 @@ import zarr
 
 from .crud import Subject, jdump, remove_node
 
+LEFT = {"scs": (1, 1.0), "freesurfer-tkr": (0, -1.0)}       # coordinate system → (axis, sign) pointing left
 EDGE_TOL = 1e-7                                          # barycentric slack for a point on an edge
 GATHER_TOL = 1e-9                                        # on the unit sphere: a DST vertex that IS a SRC vertex
 
@@ -67,13 +70,37 @@ def _surface(s: Subject, name: str) -> dict:
                    "WHERE m.subject_id = ? AND m.name = ?", s.id, f"{name}_sphere")
     if sph is None:
         raise ValueError(f"{name}: no registration sphere ({name}_sphere); interpolation goes through the spheres")
+    rd = lambda path: np.asarray(zarr.open_array(str(s.store / path), mode="r")[:])
+    faces = rd(f"{row['path']}/faces").astype(np.int64)
     hemis = s.db.all("SELECT label, from_index, n_vertices FROM manifold WHERE subject_id = ? AND component_of_id = ? "
                      "ORDER BY component_ordinal", s.id, row["id"])
-    if len(hemis) != 2 or {h["label"] for h in hemis} != {"left", "right"}:
-        raise ValueError(f"{name}: no left/right hemisphere components ({name}_1, {name}_2); both are needed to keep the hemispheres apart")
-    rd = lambda path: np.asarray(zarr.open_array(str(s.store / path), mode="r")[:])
-    return {"row": row, "sphere": _unit(rd(sph["positions_path"]).astype(np.float64)), "faces": rd(f"{row['path']}/faces").astype(np.int64),
-            "hemis": {h["label"]: (int(h["from_index"]), int(h["n_vertices"])) for h in hemis}}
+    if hemis:
+        if len(hemis) != 2 or {h["label"] for h in hemis} != {"left", "right"}:
+            raise ValueError(f"{name}: its components are not one left and one right hemisphere")
+        split = {h["label"]: (int(h["from_index"]), int(h["n_vertices"])) for h in hemis}
+    else:
+        split = _split(s, row, faces, rd)
+    return {"row": row, "sphere": _unit(rd(sph["positions_path"]).astype(np.float64)), "faces": faces, "hemis": split}
+
+
+def _split(s: Subject, row: dict, faces: np.ndarray, rd) -> dict:
+    """The hemispheres of a surface stored without components: its mesh's two connected components, left first."""
+    from scipy.sparse.csgraph import connected_components
+    name, V = row["name"], int(row["n_vertices"])
+    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]]])
+    n, lab = connected_components(sp.coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(V, V)), directed=False)
+    n0 = int((lab == lab[0]).sum())
+    if n != 2 or not (lab[:n0] == lab[0]).all():
+        raise ValueError(f"{name}: no hemisphere components, and its mesh is not two contiguous connected pieces "
+                         f"({n} components); the hemispheres cannot be kept apart")
+    cs = s.db.value("SELECT c.name FROM coordinate_system c JOIN geometry g ON g.coordinate_system_id = c.id WHERE g.id = ?",
+                    row["geometry_id"])
+    if cs in LEFT:
+        ax, sign = LEFT[cs]
+        x = rd(row["positions_path"])[:, ax] * sign
+        if x[:n0].mean() < x[n0:].mean():
+            raise ValueError(f"{name}: its first mesh component lies to the right in {cs}; the left-first order does not hold")
+    return {"left": (0, n0), "right": (n0, V - n0)}
 
 
 def add_interpolation(s: Subject, src: str, dst: str, *, replace: bool = False) -> dict:

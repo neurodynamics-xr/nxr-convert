@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.7**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.8**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.7 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.8 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -152,7 +152,8 @@ the tkr → SCS affine (`<name>_scs`) against a Brainstorm surface of the same v
 
 `interp` writes `<DST>_from_<SRC>`, a csr operator: each DST vertex in barycentric weights of the SRC triangle holding it on
 the registration spheres, within the same hemisphere; it reports row-sum error, minimum weight, share of exact gathers and the
-round trip of a smooth field.
+round trip of a smooth field. 0.2.8: a surface stored without hemisphere components (a schema-48 store) is split into its
+mesh's two connected components, left first, checked against the coordinate system's left (`scs` +y, `freesurfer-tkr` −x).
 
 ### A shared dataset written by parallel jobs
 
