@@ -148,7 +148,7 @@ def _subject_cortex(root: Path, subject: str, sub: Subject) -> str:
     raise ValueError(f"{subject}: cannot tell which cortex the fibres were assigned on")
 
 
-def compose_subject(sub: Subject, root: str | Path, subject: str, *, emit: Emit) -> dict[str, Any]:
+def compose_subject(sub: Subject, root: str | Path, subject: str, *, emit: Emit, resample: float | None = None) -> dict[str, Any]:
     """Every part of the Brainstorm subject into the Subject ``sub`` (rows pending; the caller completes)."""
     from .convert import convert_condition
     from .fibers import export_fibers, is_fibers_file
@@ -172,7 +172,7 @@ def compose_subject(sub: Subject, root: str | Path, subject: str, *, emit: Emit)
         mark = sub.mark()
         try:
             plan = condition_plan(root, subject, cond)
-            convert_condition(sub, bst_root=root, condition=cond, progress=emit, **plan)
+            convert_condition(sub, bst_root=root, condition=cond, progress=emit, resample=resample, **plan)
             summary["sessions"].append(cond)
         except (ValueError, FileNotFoundError, NotImplementedError) as e:
             sub.rollback_to(mark)
@@ -210,13 +210,13 @@ def compose_subject(sub: Subject, root: str | Path, subject: str, *, emit: Emit)
     return summary
 
 
-def convert_subject(ds: Dataset, root: str | Path, subject: str, *, emit: Emit) -> dict[str, Any]:
+def convert_subject(ds: Dataset, root: str | Path, subject: str, *, emit: Emit, resample: float | None = None) -> dict[str, Any]:
     """The whole subject as ONE composition: created pending, completed once (one drain), or removed whole."""
     root = Path(root)
     anat, inherited = anat_dir(root, subject)
     sub = Subject.create(ds, subject, source_format="brainstorm", source_path=str(anat), created_by=stamp())
     with sub.composition():
-        summary = compose_subject(sub, root, subject, emit=emit)
+        summary = compose_subject(sub, root, subject, emit=emit, resample=resample)
     n = {t: ds.db.value(f"SELECT count(*) FROM {t} WHERE subject_id = ?", sub.id) for t in ("manifold", "field", "operator", "selection")}
     emit({"stage": "subject-done", "subject": subject, "id": sub.id, "store": str(sub.store), "rows": n,
           "anatomy": "@default_subject" if inherited else "own", **{k: v for k, v in summary.items() if k != "subject"}})

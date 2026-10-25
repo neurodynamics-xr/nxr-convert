@@ -191,6 +191,10 @@ def open_database(path: str | Path, *, create: bool = False, built_by: str = "nx
         conn.executescript("BEGIN;\n" + model_sql()
                            + f"\nINSERT INTO meta (key, value) VALUES ('built_utc', '{now_utc()}');"
                            + f"\nINSERT INTO meta (key, value) VALUES ('built_by', '{built_by}');\nCOMMIT;")
+        if p != ":memory:":      # on exFAT the connection that grew the file reads it as read-only: reconnect
+            conn.close()
+            conn = sqlite3.connect(p, isolation_level=None)
+            conn.execute("PRAGMA foreign_keys = ON")
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     want = schema_version()
     if v != want:

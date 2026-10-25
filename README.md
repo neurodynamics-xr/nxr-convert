@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.4**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.5**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.4 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.5 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -118,6 +118,7 @@ nxr-convert remove  --dataset D --subject S [--node <store path>]   # the subjec
 ```
 
 `hodge` adds the Hodge–Dirac eigenmodes of the subject's primary cortex from a solve's outputs in `<dir>`
+(split layout, 0.2.5: `<S>_hodge_exact_modes/_exact_lambda/_coexact_modes/_coexact_lambda.npy` in place of `_hodge_modes.npy`; found by which files exist)
 (`<S>_hodge_mu/_modes/_mass.npy`, `<S>_glued_V/_keep.npy`, `<S>_idt_F.npy`, `<S>_hodge.json`; the solve is on the two
 hemispheres glued into one closed surface). It is stored like every eigenbasis (no schema change): the axis
 `eigen/hodgeDirac` (μ > 0 in 1/m), its `eigen/hodgeDirac_kind` (0 exact · 2 coexact), the operator

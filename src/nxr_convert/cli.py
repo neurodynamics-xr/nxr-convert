@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     psub.add_argument("root")
     psub.add_argument("--subject", required=True)
     psub.add_argument("--dataset", required=True, help="<datastore>/<dataset> (created with `dataset create`)")
+    psub.add_argument("--resample", type=float, default=None, metavar="HZ", help="store the recordings resampled to HZ (resample_poly)")
 
     pc = sub.add_parser("convert", help="convert one condition as a session of a subject (the subject made if absent)")
     pc.add_argument("root")
@@ -98,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     pc.add_argument("--all-surfaces", action="store_true")
     pc.add_argument("--include-imported", action="store_true")
     pc.add_argument("--no-raw", action="store_true")
+    pc.add_argument("--resample", type=float, default=None, metavar="HZ", help="store the recording resampled to HZ (resample_poly)")
 
     pt = sub.add_parser("template", help="the protocol's default anatomy (anat/@default_subject) as the TEMPLATE subject (D55)")
     pt.add_argument("root")
@@ -216,7 +218,7 @@ def _run(a) -> int:
     with _dataset(a.dataset) as ds:
         if a.cmd == "subject":
             from .subject import convert_subject
-            r = convert_subject(ds, a.root, a.subject, emit=_print)
+            r = convert_subject(ds, a.root, a.subject, emit=_print, resample=a.resample)
             _print({"stage": "result", **r})
             return 0
         if a.cmd == "template":
@@ -239,7 +241,7 @@ def _run(a) -> int:
                                        created_by=stamp()))
             with sub.composition():
                 r = convert_condition(sub, bst_root=root, condition=a.condition, write_gain=not a.no_gain,
-                                      all_surfaces=a.all_surfaces, progress=_print, **plan)
+                                      all_surfaces=a.all_surfaces, progress=_print, resample=a.resample, **plan)
             write_catalog(ds.root)
             _print({"stage": "result", **r})
             return 0

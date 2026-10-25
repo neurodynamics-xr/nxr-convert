@@ -34,9 +34,21 @@ PATHS = (("operator", "hodgeDirac_eigenvectors"), ("field", "eigen/hodgeDirac_ki
          ("manifold", AXIS))
 
 
+def _W(iF: np.ndarray, M2: np.ndarray, nV: int):
+    """⟨φ₂, ω_v⟩ = Σ over the faces round v of ⋆₂φ₂, ÷ their count (the reference's W)."""
+    nF = len(iF)
+    inc = sp.csr_matrix((np.ones(3 * nF), (iF.ravel(), np.repeat(np.arange(nF), 3))), shape=(nV, nF))
+    return sp.diags(1 / np.maximum(np.asarray(inc.sum(1)).ravel(), 1)) @ inc @ sp.diags(M2)
+
+
 def package(d: str | Path, sub: str) -> dict:
-    """Read nsp's ``<sub>_hodge_*`` outputs and derive the vertex-potential package (glued vertex indexing)."""
+    """Read nsp's ``<sub>_hodge_*`` outputs and derive the vertex-potential package (glued vertex indexing).
+
+    Two layouts, found by which files exist: the OLD one (``_hodge_modes.npy``, every mode a full form [K × (nV+nE+nF)]) and
+    nsp's SPLIT K=6000 one (``_hodge_exact_modes.npy`` [n0 × nV] and ``_hodge_coexact_modes.npy`` [n2 × nF], with λ each)."""
     d = Path(d)
+    if (d / f"{sub}_hodge_exact_modes.npy").exists():
+        return _package_split(d, sub)
     ld = lambda n: np.load(d / f"{sub}_{n}.npy")
     meta = json.loads((d / f"{sub}_hodge.json").read_text())
     nV, nE, nF = (int(meta["hodge"][k]) for k in ("nV", "nE", "nF"))
@@ -53,14 +65,56 @@ def package(d: str | Path, sub: str) -> dict:
     if mixing > 1e-3:
         raise ValueError(f"{sub}: a mode is neither exact nor coexact (mixing {mixing:.2e}); a degenerate μ needs a split first")
     kind = np.where(w0 >= w2, 0, 2).astype(np.uint8)
-    # ⟨φ₂, ω_v⟩ = Σ over the faces round v of ⋆₂φ₂, ÷ their count (the reference's W)
-    inc = sp.csr_matrix((np.ones(3 * nF), (iF.ravel(), np.repeat(np.arange(nF), 3))), shape=(nV, nF))
-    deg = np.asarray(inc.sum(1)).ravel()
-    W = sp.diags(1 / np.maximum(deg, 1)) @ inc @ sp.diags(M[nV + nE:])
+    W = _W(iF, M[nV + nE:], nV)
     P = np.where((kind == 0)[:, None], X[:, :nV], (W @ X[:, nV + nE:].T).T)   # [K × nV], ψ/√2 already in the modes
     o = np.argsort(mu, kind="stable")
     return {"mu": mu[o], "kind": kind[o], "potentials": P[o], "keep": keep, "meta": meta, "mixing": mixing,
             "glued_V": ld("glued_V")}
+
+
+def _package_split(d: Path, sub: str, chunk: int = 32) -> dict:
+    """The split layout. Modes are memmapped and read ``chunk`` rows at a time (the files are GBs); potentials are float32."""
+    ld = lambda n, **k: np.load(d / f"{sub}_{n}.npy", **k)
+    meta = json.loads((d / f"{sub}_hodge.json").read_text())
+    nV, nE, nF = (int(meta["hodge"][k]) for k in ("nV", "nE", "nF"))
+    M, keep, iF = ld("hodge_mass").ravel(), ld("glued_keep").ravel().astype(np.int64), ld("idt_F").astype(np.int64)
+    ex, co = ld("hodge_exact_modes", mmap_mode="r"), ld("hodge_coexact_modes", mmap_mode="r")
+    lam = [ld("hodge_exact_lambda").ravel(), ld("hodge_coexact_lambda").ravel()]
+    if (ex.ndim, co.ndim) != (2, 2) or ex.shape != (lam[0].size, nV) or co.shape != (lam[1].size, nF) or M.size != nV + nE + nF \
+            or keep.size != nV or iF.shape != (nF, 3):
+        raise ValueError(f"{sub}: nsp outputs disagree with their own sizes (exact {ex.shape}, coexact {co.shape}, lambdas "
+                         f"{lam[0].size}/{lam[1].size}, mass {M.size}, keep {keep.size}, faces {iF.shape}; nV {nV} nE {nE} nF {nF})")
+    # μ = √λ per positive mode; both ladders merged, ascending; the zero modes (constants) out
+    lam_all = np.concatenate(lam)
+    mu_all = np.sqrt(np.maximum(lam_all, 0))
+    use = np.where(mu_all > 1e-6 * mu_all.max())[0]
+    o = use[np.argsort(mu_all[use], kind="stable")]
+    mu, kind = mu_all[o], np.where(o < lam[0].size, 0, 2).astype(np.uint8)
+    dest = np.full(lam_all.size, -1)
+    dest[o] = np.arange(o.size)
+    # the merged ladders must be nsp's own μ (its positive ± pairs)
+    ref = np.sort(ld("hodge_mu").ravel())
+    ref = ref[ref > 1e-6 * np.abs(ref).max()]
+    if ref.size != mu.size or not np.allclose(ref, mu, rtol=1e-6, atol=0):
+        raise ValueError(f"{sub}: the split ladders' √λ do not agree with hodge_mu ({mu.size} vs {ref.size} positive modes)")
+    W = _W(iF, M[nV + nE:], nV)
+    P = np.zeros((mu.size, nV), np.float32)
+    for arr, w, base, n, name in ((ex, M[:nV], 0, nV, "exact"), (co, M[nV + nE:], lam[0].size, nF, "coexact")):
+        scale = None
+        for i in range(0, arr.shape[0], chunk):
+            X = np.asarray(arr[i:i + chunk], dtype=np.float64)
+            nrm = (X ** 2 * w).sum(1)
+            if scale is None:                               # the normalisation is read off the data, not assumed
+                scale = 1 / np.sqrt(2) if abs(nrm[-1] - 1) < 1e-3 else 1.0 if abs(nrm[-1] - 0.5) < 1e-3 else None
+                if scale is None:
+                    raise ValueError(f"{sub}: {name} modes have Σ·⋆ = {nrm[-1]:.4g}, neither 1 (ψ) nor 0.5 (ψ/√2)")
+            keep_rows = (base + i + np.arange(X.shape[0]))
+            ok = dest[keep_rows] >= 0                       # skip the zero modes; the rest must all share the norm
+            if np.abs(nrm[ok] * scale ** 2 - 0.5).max(initial=0) > 1e-3:
+                raise ValueError(f"{sub}: {name} modes are not all normalised alike (Σ·⋆ {nrm[ok].min():.4g} … {nrm[ok].max():.4g})")
+            Y = X[ok] if name == "exact" else (W @ X[ok].T).T
+            P[dest[keep_rows[ok]]] = Y * scale
+    return {"mu": mu, "kind": kind, "potentials": P, "keep": keep, "meta": meta, "mixing": 0.0, "glued_V": ld("glued_V")}
 
 
 def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: bool = False, tol_m: float = 1e-6) -> dict:

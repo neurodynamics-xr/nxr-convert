@@ -27,6 +27,27 @@ from .events import export_events, parse_events
 from .grid import BLOCK, WINDOW, EnvelopeTee, envelope_path, recording_meta
 
 
+def resample_rows(read, n_chan: int, n_t: int, fs: float, to: float, step: int = 16) -> np.ndarray:
+    """``read(c0, c1) -> [c1-c0, n_t]`` resampled fs -> to by ``resample_poly`` (anti-aliased), ``step`` channels at a time,
+    into one float32 [C, ceil(n_t*to/fs)] array (300 ch at 300 Hz x 600 s = 216 MB; peak input = step rows)."""
+    from fractions import Fraction
+    from scipy.signal import resample_poly
+    r = Fraction(round(to * 1000), round(fs * 1000))
+    if r.denominator > 1000 or r.numerator > 1000:
+        raise ValueError(f"cannot resample {fs} Hz to {to} Hz: the ratio {r} is not a small fraction")
+    n_new = -(-n_t * r.numerator // r.denominator)
+    out = np.empty((n_chan, n_new), dtype=np.float32)
+    for c0 in range(0, n_chan, step):
+        c1 = min(c0 + step, n_chan)
+        out[c0:c1] = resample_poly(np.asarray(read(c0, c1), dtype=np.float64), r.numerator, r.denominator, axis=1)
+    return out
+
+
+def _write_blocks(arr, x: np.ndarray, block: int) -> None:
+    for s0 in range(0, x.shape[1], block):
+        arr[:, s0:s0 + block] = x[:, s0:s0 + block]
+
+
 def _time_line(sub: Subject, path: str, *, session: str, n_samples: int, sfreq: float, t0: float) -> str:
     """The Time Line: three numbers, exactly as a Volume's voxel positions are — a closed form, no array."""
     return sub.manifold(name=path.rsplit("/", 1)[-1], path=path, type="line", n_vertices=int(n_samples), session=session,
@@ -87,7 +108,8 @@ def _recording(sub: Subject, name: str, *, n_chan: int, n_samples: int, sfreq: f
 
 def export_raw_timeseries(sub: Subject, name: str, sfile: dict, channel_flag: np.ndarray | None, *, session: str,
                           channels_id: str, comment: str | None = None, bst_path: str | Path | None = None,
-                          block: int = BLOCK, channel_names: list[str] | None = None, progress=None) -> dict:
+                          block: int = BLOCK, channel_names: list[str] | None = None, progress=None,
+                          resample: float | None = None) -> dict:
     """A RAW LINK's native-rate recording, block-streamed from the BST-BIN binary. Byte-faithful: the ``.bst`` already
     carries the processed (SSP-applied, notch-filtered) signal (measured: skipping the projector reproduces the MATLAB
     export to 6e-13 through three cascaded decimations — the bytes are the truth)."""
@@ -110,20 +132,30 @@ def export_raw_timeseries(sub: Subject, name: str, sfile: dict, channel_flag: np
     sfreq = float(np.asarray(sfile["prop"]["sfreq"]).item())
     t0 = float(np.atleast_1d(np.asarray(sfile["prop"]["times"]))[0])
 
-    def write(arr) -> None:
-        for s0 in range(0, n_t, block):
-            n = min(block, n_t - s0)
-            arr[:, s0:s0 + n] = read_bst(sfile, s0=s0, n=n, path=bst_path)
-            if progress:
-                progress({"stage": "raw-stream", "name": name, "written": s0 + n, "of": n_t})
+    producer = {"format": fmt, "device": str(sfile.get("device", "")), **({"bst_file": str(bst_path)} if bst_path else {})}
+    events = sfile.get("events")                                     # events are in seconds: unchanged by resampling
+    if resample and resample != sfreq:
+        x = resample_rows(lambda c0, c1: read_bst(sfile, channels=(c0, c1), path=bst_path), n_chan, n_t, sfreq, float(resample))
+        producer["resample"] = {"from": sfreq, "to": float(resample), "method": "resample_poly"}
+        n_t, sfreq = x.shape[1], float(resample)
+
+        def write(arr) -> None:
+            _write_blocks(arr, x, block)
+    else:
+        def write(arr) -> None:
+            for s0 in range(0, n_t, block):
+                n = min(block, n_t - s0)
+                arr[:, s0:s0 + n] = read_bst(sfile, s0=s0, n=n, path=bst_path)
+                if progress:
+                    progress({"stage": "raw-stream", "name": name, "written": s0 + n, "of": n_t})
     return _recording(sub, name, n_chan=n_chan, n_samples=n_t, sfreq=sfreq, t0=t0, session=session, channels_id=channels_id,
-                      write=write, flags=channel_flag, events=sfile.get("events"), channel_names=channel_names, comment=comment,
-                      kind="sensor", source="raw-link", progress=progress,
-                      producer={"format": fmt, "device": str(sfile.get("device", "")), **({"bst_file": str(bst_path)} if bst_path else {})})
+                      write=write, flags=channel_flag, events=events, channel_names=channel_names, comment=comment,
+                      kind="sensor", source="raw-link", progress=progress, producer=producer)
 
 
 def export_timeseries(sub: Subject, name: str, data_mat: dict, *, kind: str = "sensor", session: str, channels_id: str,
-                      channel_names: list[str] | None = None) -> dict:
+                      channel_names: list[str] | None = None,
+                      resample: float | None = None) -> dict:
     """An IMPORTED excerpt (``data_*.mat``, ``F`` a matrix) — written a shard at a time."""
     f = data_mat.get("F")
     if isinstance(f, dict):
@@ -135,11 +167,15 @@ def export_timeseries(sub: Subject, name: str, data_mat: dict, *, kind: str = "s
     sfreq = 1.0 / float(np.mean(np.diff(t)))
     n_chan, n_t = f.shape
     f32 = f.astype(np.float32, copy=False)
+    producer = {"data_type": str(data_mat.get("DataType", ""))}
+    if resample and resample != sfreq:
+        producer["resample"] = {"from": sfreq, "to": float(resample), "method": "resample_poly"}
+        f32 = resample_rows(lambda c0, c1: f32[c0:c1], n_chan, n_t, sfreq, float(resample))
+        n_t, sfreq = f32.shape[1], float(resample)
 
     def write(arr) -> None:
-        for s0 in range(0, n_t, BLOCK):
-            arr[:, s0:s0 + BLOCK] = f32[:, s0:s0 + BLOCK]
+        _write_blocks(arr, f32, BLOCK)
     return _recording(sub, name, n_chan=n_chan, n_samples=n_t, sfreq=sfreq, t0=float(t[0]), session=session, channels_id=channels_id,
                       write=write, flags=data_mat.get("ChannelFlag"), events=data_mat.get("Events"), channel_names=channel_names,
                       comment=data_mat.get("Comment"), kind=kind, source="imported",
-                      producer={"data_type": str(data_mat.get("DataType", ""))})
+                      producer=producer)

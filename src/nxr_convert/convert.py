@@ -68,7 +68,8 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
                       extra_surfaces: list[Path] | None = None, data_files: list[str | Path], channel_file: str | Path,
                       kernel_files: list[str | Path] | None = None, raw_data_file: str | Path | None = None,
                       head_model_map: dict[str, str] | None = None, write_gain: bool = True, require_source_grid: bool = True,
-                      progress: Progress | None = None, all_surfaces: bool = False) -> dict:
+                      progress: Progress | None = None, all_surfaces: bool = False,
+                      resample: float | None = None) -> dict:
     """Mirror one Brainstorm condition into the subject ``sub`` as the session ``condition``."""
     bst_root = Path(bst_root)
     if not data_files and raw_data_file is None:
@@ -138,7 +139,8 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
     # ---- the recording(s) ----
     for i, df in enumerate(data_files):
         data = first if (i == 0 and first is not None) else load_mat(df)
-        ti = export_timeseries(sub, recording_node_name(df), data, session=session, channels_id=si["id"], channel_names=si["names"])
+        ti = export_timeseries(sub, recording_node_name(df), data, session=session, channels_id=si["id"], channel_names=si["names"],
+                               resample=resample)
         _emit(progress, stage="timeseries", **{k: ti[k] for k in ("name", "n_samples", "sfreq", "events")})
     if raw_data_file is not None:
         raw_mat = raw_mat or load_mat(raw_data_file)
@@ -148,7 +150,7 @@ def convert_condition(sub: Subject, *, bst_root: str | Path, condition: str, sur
         ri = export_raw_timeseries(sub, recording_node_name(raw_data_file), sfile, raw_mat.get("ChannelFlag"), session=session,
                                    channels_id=si["id"], comment=raw_mat.get("Comment"),
                                    bst_path=resolve_raw_binary(raw_data_file, sfile, progress), channel_names=si["names"],
-                                   progress=progress)
+                                   progress=progress, resample=resample)
         _emit(progress, stage="timeseries-raw", **{k: v for k, v in ri.items() if k not in ("id", "time_id")})
 
     # ---- kernels (+ head models, deduped per file) ----
