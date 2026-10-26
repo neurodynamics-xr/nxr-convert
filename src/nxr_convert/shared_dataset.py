@@ -17,6 +17,13 @@ replaces each fragment's subject in the shared database by the fragment's copy, 
 dictionary the dataset already holds under the same name is the dataset's: the fragment's references are moved to it), and
 rewrites that subject's nodes' ``zarr.json`` from the merged rows. A merge never removes a folder: the command that ran in the
 fragment did whatever its own rows say on disk.
+
+A NEW SUBJECT, converted in parallel (0.2.12, for nsp's full-cohort builds): ``nxr-convert fragment --new --dataset <ds> --to <root>``
+makes an EMPTY fragment — the shared rows and the templates, no subject — into which a job converts its subject (``subject`` ·
+``inverse`` · ``atlas build`` …). Its store is then a REAL folder in the fragment: ``merge`` names the subject (the fragment's one
+non-template subject the dataset did not have), refuses a name the dataset holds (``--replace``: the old rows go and its store is
+MOVED ASIDE, never deleted) and an id another subject owns, MOVES the store into the dataset folder (a rename on one filesystem,
+else copy and then remove the fragment's copy — reported per subject), and folds the rows in as above.
 """
 from __future__ import annotations
 
@@ -25,6 +32,7 @@ import os
 import re
 import shutil
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .db import (DATASET_FILE, NODE_TABLES, _finish, drain, location_of_row, model_sql, open_database, pending_jobs,
@@ -172,7 +180,10 @@ def _insert(conn, table: str, where: str, args=(), mode: str = "OR IGNORE") -> i
     return conn.execute(f'INSERT {mode} INTO main."{table}" ({q}) SELECT {q} FROM f."{table}" WHERE {where}', args).rowcount
 
 
-def fragment(folder: str | Path, subject: str, out_root: str | Path) -> dict:
+def fragment(folder: str | Path, subject: str | None, out_root: str | Path, *, new: bool = False) -> dict:
+    """one subject's writable copy of the shared dataset — or (``new``) an EMPTY one for a subject not yet converted"""
+    if new == (subject is not None):
+        raise ValueError("fragment: give a --subject, or --new (for a subject not yet in the dataset), not both")
     folder = Path(folder).resolve()
     frag = Path(out_root).resolve() / folder.name
     if (frag / DATASET_FILE).exists():
@@ -183,10 +194,11 @@ def fragment(folder: str | Path, subject: str, out_root: str | Path) -> dict:
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute("ATTACH DATABASE ? AS f", (f"file:{folder / DATASET_FILE}?mode=ro&immutable=1",))
     try:
-        row = conn.execute("SELECT id, path FROM f.subject WHERE name = ?", (subject,)).fetchone()
-        if row is None:
+        row = None if new else conn.execute("SELECT id, path FROM f.subject WHERE name = ?", (subject,)).fetchone()
+        if row is None and not new:
             raise KeyError(f"{folder}: no subject {subject!r}")
-        sid, spath = row
+        sid, spath = row if row else (None, None)
+        before = [r[0] for r in conn.execute("SELECT id FROM f.subject")]
         conn.execute("BEGIN")
         owners = _owners(conn)
         for t in _tables(conn):
@@ -203,27 +215,77 @@ def fragment(folder: str | Path, subject: str, out_root: str | Path) -> dict:
     finally:
         conn.execute("DETACH DATABASE f")
         conn.close()
-    for p in [spath] + [p for _, p in tpl]:
+    for p in ([spath] if spath else []) + [p for _, p in tpl]:
         if (folder / p).exists() and not (frag / p).exists():
             os.symlink(folder / p, frag / p, target_is_directory=True)
-    link = frag / spath
-    (frag / FRAGMENT_FILE).write_text(json.dumps({"subject": subject, "subject_id": sid, "dataset": str(folder),
-                                                  "templates": [i for i, _ in tpl]}, indent=2))
-    return {"fragment": str(frag), "subject": subject, "store": str(link)}
+    (frag / FRAGMENT_FILE).write_text(json.dumps({"subject": subject, "subject_id": sid, "dataset": str(folder), "new": new,
+                                                  "subjects_before": before, "templates": [i for i, _ in tpl]}, indent=2))
+    return {"fragment": str(frag), "subject": subject, "new": new, **({"store": str(frag / spath)} if spath else {})}
 
 
-def _merge_one(db, frag: Path) -> dict:
+def _new_subject(conn, info: dict, frag: Path) -> tuple[str, str]:
+    """a NEW fragment's subject: its one non-template subject the dataset did not have"""
+    before = set(info.get("subjects_before") or [])
+    rows = [r for r in conn.execute("SELECT id, name FROM f.subject WHERE kind IS NOT 'template'").fetchall() if r[0] not in before]
+    if len(rows) != 1:
+        raise RuntimeError(f"{frag}: a --new fragment holds {len(rows)} new subjects ({', '.join(r[1] for r in rows) or 'none'}): one is merged")
+    return rows[0]
+
+
+def _move_store(src: Path, dst: Path) -> str:
+    """the subject's store from the fragment into the dataset: 'renamed' (one filesystem), else 'copied' (the fragment's copy kept
+    until the rows are in — `_drop_source` removes it)"""
+    if dst.exists() or dst.is_symlink():
+        raise FileExistsError(f"{dst}: the dataset already holds this store")
+    try:
+        os.rename(src, dst)
+        return "renamed"
+    except OSError:
+        shutil.copytree(src, dst, symlinks=True)
+        return "copied"
+
+
+def _merge_one(db, frag: Path, folder: Path, replace: bool = False) -> dict:
     info = json.loads((frag / FRAGMENT_FILE).read_text())
     sid = info["subject_id"]
     conn = db.conn
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute("ATTACH DATABASE ? AS f", (str(frag / DATASET_FILE),))
+    store, moved, aside, had = "linked", None, None, None
     try:
         if conn.execute("PRAGMA f.user_version").fetchone()[0] != schema_version():
             raise RuntimeError(f"{frag}: not at schema {schema_version()}")
         owners = _owners(conn)
+        if info.get("new"):
+            sid, name = _new_subject(conn, info, frag)
+            info["subject"] = name
+            had = conn.execute("SELECT id, path FROM main.subject WHERE name = ?", (name,)).fetchone()
+            if had and not replace:
+                raise RuntimeError(f"{frag}: the dataset already holds a subject {name!r} (--replace to replace it)")
+            # an id this subject's rows bring must not be another subject's in the dataset
+            for t in owners:
+                hit = conn.execute(f'SELECT count(*) FROM f."{t}" g JOIN main."{t}" m ON m.id = g.id WHERE g.subject_id = ? AND m.subject_id IS NOT ?',
+                                   (sid, had[0] if had else sid)).fetchone()[0] if "id" in _cols(conn, t) else 0
+                if hit:
+                    raise RuntimeError(f"{frag}: {hit} {t} id(s) of {name} are another subject's in the dataset")
+            spath = conn.execute("SELECT path FROM f.subject WHERE id = ?", (sid,)).fetchone()[0]
+            src, dst = frag / spath, folder / spath
+            if src.is_symlink() or not src.exists():
+                raise RuntimeError(f"{frag}: {spath} is not a store of the fragment's own")
+            if had and (folder / had[1]).exists():                        # --replace: the old subject's store is moved ASIDE (its rows go in the transaction)
+                aside = folder / f"{had[1]}.replaced-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+                os.rename(folder / had[1], aside)
+            store, moved = _move_store(src, dst), (src, dst)
         conn.execute("BEGIN")
+        # the queue as it stands: every job the merge's own deletes enqueue (ids above j0) is dropped below — a replaced subject's
+        # 'delete' names the very path its new store now holds
         j0 = conn.execute("SELECT coalesce(max(id), 0) FROM sync_job").fetchone()[0]
+        if info.get("new") and had:                                       # --replace: the old subject's rows, children first
+            for t, (col, parent) in CHILD.items():
+                conn.execute(f'DELETE FROM main."{t}" WHERE "{col}" IN (SELECT id FROM main."{parent}" WHERE subject_id = ?)', (had[0],))
+            for t in owners:
+                conn.execute(f'DELETE FROM main."{t}" WHERE subject_id = ?', (had[0],))
+            conn.execute("DELETE FROM main.subject WHERE id = ?", (had[0],))
         # the subject's rows in the shared database go (children first), then the fragment's copy comes in whole
         for t, (col, parent) in CHILD.items():
             conn.execute(f'DELETE FROM main."{t}" WHERE "{col}" IN (SELECT id FROM main."{parent}" WHERE subject_id = ?)', (sid,))
@@ -260,20 +322,35 @@ def _merge_one(db, frag: Path) -> dict:
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
+        # the store goes back where it was (a copy is dropped: the fragment's is untouched); an old one moved aside comes back
+        if moved:
+            src, dst = moved
+            if store == "renamed":
+                os.rename(dst, src)
+            else:
+                shutil.rmtree(dst, ignore_errors=True)
+        if aside:
+            os.rename(aside, folder / aside.name.rsplit(".replaced-", 1)[0])
         raise
     finally:
         conn.execute("DETACH DATABASE f")
         conn.execute("PRAGMA foreign_keys = ON")
-    return {"subject": info["subject"], "rows": sum(n.values()), "remapped": remap}
+    if store == "copied":
+        shutil.rmtree(moved[0])                                           # the rows are in: the fragment's copy goes
+    return {"subject": info["subject"], "store": store, "rows": sum(n.values()), "remapped": remap,
+            **({"replaced_store_moved_to": str(aside)} if aside else {})}
 
 
-def merge(folder: str | Path, fragments: list[str | Path]) -> dict:
-    from .crud import open_dataset
-    out = []
+def merge(folder: str | Path, fragments: list[str | Path], *, replace: bool = False) -> dict:
+    """fold fragments into the shared dataset, one after another in ONE call (a fragment's failure stops the merge there: the ones
+    before it are in, it and the rest are not); each subject's store reported 'linked', 'renamed' or 'copied'"""
+    from .crud import open_dataset, write_catalog
+    folder, out = Path(folder).resolve(), []
     with open_dataset(folder) as ds:
         for f in fragments:
-            out.append(_merge_one(ds.db, Path(f).resolve()))
+            out.append(_merge_one(ds.db, Path(f).resolve(), folder, replace))
             w = drain(ds.db, ds.root)
             out[-1]["written"] = len(w["written"])
         fk = ds.db.conn.execute("PRAGMA foreign_key_check").fetchall()
-    return {"merged": out, "foreign_key_violations": len(fk)}
+    write_catalog(folder.parent)
+    return {"merged": out, "foreign_key_violations": len(fk), "stores": {m["store"]: sum(1 for x in out if x["store"] == m["store"]) for m in out}}

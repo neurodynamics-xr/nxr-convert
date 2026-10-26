@@ -198,11 +198,13 @@ def main(argv: list[str] | None = None) -> int:
     pmg.add_argument("--dataset", required=True, help="<datastore>/<dataset>: its subject stores already extracted here")
     pfr = sub.add_parser("fragment", help="one subject's writable copy of a shared dataset, for a parallel job (merge folds it back)")
     pfr.add_argument("--dataset", required=True)
-    pfr.add_argument("--subject", required=True)
+    pfr.add_argument("--subject", default=None, help="the subject (one already in the dataset)")
+    pfr.add_argument("--new", action="store_true", help="an EMPTY fragment, for a subject not yet in the dataset (converted into it, merged in)")
     pfr.add_argument("--to", dest="dst", required=True, help="a folder; the fragment is <to>/<dataset>, the command's --dataset")
     pme = sub.add_parser("merge", help="fold fragments back into their shared dataset, serially, their nodes resynced")
     pme.add_argument("--dataset", required=True)
     pme.add_argument("fragments", nargs="+")
+    pme.add_argument("--replace", action="store_true", help="a new fragment's subject replaces one of the same name (its store moved aside)")
     pt2 = sub.add_parser("templates", help="build or extend the templates-and-references dataset: fsaverage (ico7) as the template, "
                                            "reference maps (nsp's references-fsaverage-ico7 folder) as Fields; re-run to add maps")
     pt2.add_argument("source", help="the references-fsaverage-ico7 folder")
@@ -238,8 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd in ("migrate", "fragment", "merge"):
         from . import shared_dataset as sd
         try:
-            out = (sd.migrate(a.src, a.dataset) if a.cmd == "migrate" else sd.fragment(a.dataset, a.subject, a.dst)
-                   if a.cmd == "fragment" else sd.merge(a.dataset, a.fragments))
+            out = (sd.migrate(a.src, a.dataset) if a.cmd == "migrate" else sd.fragment(a.dataset, a.subject, a.dst, new=a.new)
+                   if a.cmd == "fragment" else sd.merge(a.dataset, a.fragments, replace=a.replace))
         except Exception as e:  # noqa: BLE001
             _print({"stage": "error", "message": f"{type(e).__name__}: {e}"})
             return 1

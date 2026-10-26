@@ -69,9 +69,12 @@ def _write_flags(sub: Subject, rec_path: str, flags: Any, *, session: str, chann
 
 def _recording(sub: Subject, name: str, *, n_chan: int, n_samples: int, sfreq: float, t0: float, session: str,
                channels_id: str, write: Callable[[Any], None], flags: Any, events: Any, channel_names: list[str] | None,
-               comment: str | None, kind: str, source: str, producer: dict[str, Any], progress=None) -> dict:
-    rec = f"timeseries/{name}"
-    time_id = _time_line(sub, f"{rec}_time", session=session, n_samples=n_samples, sfreq=sfreq, t0=t0)
+               comment: str | None, kind: str, source: str, producer: dict[str, Any], progress=None, folder: str = "timeseries",
+               field_kind: str = "recording", description: str | None = None, unit: str | None = None, time_id: str | None = None) -> dict:
+    """everything after the bytes; also a time-resolved MAP's (``folder`` sources, its rows the surface's vertices or a
+    matrix's rows, ``time_id`` a Line another field already lives on)"""
+    rec = f"{folder}/{name}"
+    time_id = time_id or _time_line(sub, f"{rec}_time", session=session, n_samples=n_samples, sfreq=sfreq, t0=t0)
     product = sub.product([channels_id, time_id], session=session)
     meta = recording_meta(n_chan, n_samples)
 
@@ -80,8 +83,8 @@ def _recording(sub: Subject, name: str, *, n_chan: int, n_samples: int, sfreq: f
         write(EnvelopeTee(populate_array(at), sub.at(envelope_path(rec))))
         if progress:
             progress({"stage": "envelope", "name": name})
-    rid = sub.field(name=name, path=rec, kind="recording", manifold_id=product, meta=meta, populate=populate, session=session,
-                    description=f"{session} — the {kind} recording", comment=str(comment) if comment else None, source=source,
+    rid = sub.field(name=name, path=rec, kind=field_kind, manifold_id=product, meta=meta, populate=populate, session=session, unit=unit,
+                    description=description or f"{session} — the {kind} recording", comment=str(comment) if comment else None, source=source,
                     producer_json=jdump({"kind": kind, **producer}))
     dt = 1.0 / float(sfreq)
     # THE CHUNK GRID (D46): closed form — four numbers state a regular grid, `at(k)` derives every member

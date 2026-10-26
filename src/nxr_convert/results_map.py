@@ -10,8 +10,13 @@ Nothing read these before; the kernel path skips them by design.
 
 A STATIC map is one value per vertex: Brainstorm stores it as one time column, or as
 two identical columns (its ``Time = [0 1]`` convention for a map with no time). A map
-that genuinely varies over time needs a time Line to live on, which a source map in
-this store does not have yet — it is REFUSED with that reason, not flattened.
+over time (``Time`` of more than two points — a BOLD series, 0.2.12) is a Field on the
+surface × a time Line at its sampling (the TR), stored as a recording is (sharded, its
+chunk grid and envelope); its confounds (``matrix_*.mat`` over time, ``export_matrix_series``)
+sit on a points manifold of their rows × the SAME Line:
+
+    sources/<stem>          Field  [nVertices, nTime] float32 on <surface> × sources/<stem>_time
+    sources/<conf>          Field  [nRows, nTime] on sources/<conf>_rows × sources/<stem>_time (rows named by <conf>_rows_names)
 
 The surface is the map's own: if the store does not hold it yet it is exported
 beside the primary (never as the primary — the inverse's surface is the primary).
@@ -31,6 +36,7 @@ from typing import Any
 import numpy as np
 
 from .crud import Subject, jdump
+from .entities import labelling
 from .matio import load_mat, load_mat_vars, struct_rows
 from .naming import sanitize_node_name, surface_node_name
 from .surface import export_surface, folder_for_surface
@@ -57,14 +63,15 @@ def find_source_maps(cond_dir: str | Path) -> list[Path]:
 
 def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str | Path, session: str | None) -> dict[str, Any]:
     p = Path(results_file)
-    nt = np.size(load_mat_vars(p, ["Time"]).get("Time"))          # PROBED: a time-resolved map is V × T, never loaded
-    if nt > 2:
-        raise ValueError(f"{p.name}: a map over {nt} time points needs a time Line — "
-                         "only static maps (one value per vertex) are converted")
-    m = load_mat(p)
+    m = load_mat(p)          # ponytail: a time-resolved map is loaded whole (15k vertices × 150 TRs = 18 MB); stream it if maps grow to 10⁵ × 10³
     if not is_source_map(m):
         raise ValueError(f"{p.name}: not a source map (needs a non-empty ImageGridAmp and no ImagingKernel)")
-    amp = _static_column(m["ImageGridAmp"], p.name)[:, None]
+    t = np.asarray(m.get("Time") if m.get("Time") is not None else [], dtype=np.float64).ravel()
+    amp = np.asarray(m["ImageGridAmp"], dtype=np.float64)
+    amp = amp[:, None] if amp.ndim == 1 else amp
+    timed = t.size > 2
+    if not timed:
+        amp = _static_column(amp, p.name)[:, None]
     surface_rel = str(m.get("SurfaceFile", ""))
     surf, spath, _ = _surface_of(sub, surface_rel, bst_root=bst_root, what=p.name)
     sname = spath.rsplit("/", 1)[-1]
@@ -76,11 +83,70 @@ def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str |
     if sub.find("field", node):
         raise ValueError(f"{p.name}: the subject already holds {node}")
     text = f"{stem} {comment}".lower()
+    unit = "SUVR" if "suvr" in text else None
+    producer = {"surface": surface_rel, **({"display_units": str(m["DisplayUnits"])} if m.get("DisplayUnits") else {})}
+    if timed:                                                        # a BOLD series: on the surface × its own time Line, stored as a recording is
+        if amp.shape[1] != t.size:
+            raise ValueError(f"{p.name}: {amp.shape[1]} columns for {t.size} time points")
+        info = _series(sub, stem, amp, t, rows_id=surf["id"], session=session, comment=comment, source=p.name, unit=unit, producer=producer,
+                       description=f"{comment} — one series per vertex of {sname}", what=p.name)
+        return {"name": stem, "id": info["id"], "surface": sname, "n_vertices": int(amp.shape[0]), "kind": comment,
+                "n_samples": int(t.size), "spacing_s": info["spacing_s"]}
     fid = sub.field(name=stem, path=node, kind=comment, manifold_id=surf["id"], data=amp[:, 0].astype(np.float32),
                     description=f"{comment} — one value per vertex of {sname}", comment=comment, session=session, source=p.name,
-                    unit="SUVR" if "suvr" in text else None,
-                    producer_json=jdump({"surface": surface_rel, **({"display_units": str(m["DisplayUnits"])} if m.get("DisplayUnits") else {})}))
+                    unit=unit, producer_json=jdump(producer))
     return {"name": stem, "id": fid, "surface": sname, "n_vertices": int(amp.shape[0]), "kind": comment}
+
+
+def _series(sub: Subject, stem: str, x: np.ndarray, t: np.ndarray, *, rows_id: str, session: str | None, comment: str, source: str,
+            unit: str | None, producer: dict, description: str, what: str) -> dict:
+    """[rows × T] values on rows × a time Line — the Line another field of the session already has at the same sampling (a BOLD
+    map's, for its confounds), else its own — written by the recording writer (chunk grid, envelope)."""
+    from .grid import BLOCK
+    from .timeseries import _recording, _write_blocks
+    dt = np.diff(t)
+    if not (dt[0] > 0 and np.allclose(dt, dt[0], rtol=1e-6, atol=0)):
+        raise ValueError(f"{what}: its Time is not a regular sampling — a time Line needs one")
+    t0, step = float(t[0]), float(dt[0])
+    line = sub.db.one("SELECT m.id FROM manifold m JOIN geometry_dimension d ON d.geometry_id = m.geometry_id WHERE m.subject_id = ? "
+                      "AND m.type = 'line' AND m.session IS ? AND d.n_vertices = ? AND abs(d.spacing - ?) <= 1e-9 * ? "
+                      "AND abs(coalesce(d.origin, 0) - ?) <= 1e-9 * ? AND m.path LIKE 'sources/%'",
+                      sub.id, session, int(t.size), step, step, t0, step)
+    xs = np.ascontiguousarray(x, dtype=np.float32)
+    info = _recording(sub, stem, n_chan=xs.shape[0], n_samples=xs.shape[1], sfreq=1.0 / step, t0=t0, session=session, channels_id=rows_id,
+                      write=lambda arr: _write_blocks(arr, xs, BLOCK), flags=None, events=None, channel_names=None, comment=comment,
+                      kind="map", source=source, producer=producer, folder="sources", field_kind=comment, description=description,
+                      unit=unit, time_id=line["id"] if line else None)
+    return {**info, "spacing_s": step}
+
+
+def is_matrix_series(path: str | Path) -> bool:
+    """A ``matrix_*.mat`` over time (``Time`` of more than two points) that is not a region map — an fMRI confounds matrix."""
+    return np.size(load_mat_vars(path, ["Time"]).get("Time")) > 2 and not is_region_map(path)
+
+
+def export_matrix_series(sub: Subject, matrix_file: str | Path, *, session: str | None) -> dict[str, Any]:
+    """A matrix over time (``Value`` [nRows × nTime], ``Description`` the row names): a Field on a ``points`` manifold of its rows
+    (named by a labelling) × the session's time Line at its sampling — so confounds share time with their BOLD map."""
+    p = Path(matrix_file)
+    m = load_mat(p)
+    v = np.asarray(m.get("Value"), dtype=np.float64)
+    t = np.asarray(m.get("Time"), dtype=np.float64).ravel()
+    names = [str(d).strip() for d in np.atleast_1d(np.asarray(m.get("Description"), dtype=object)).ravel()]
+    if v.ndim != 2 or v.shape != (len(names), t.size):
+        raise ValueError(f"{p.name}: Value {v.shape} for {len(names)} names × {t.size} time points")
+    comment = str(m.get("Comment", "")) or p.stem
+    stem = sanitize_node_name(p.stem.removeprefix("matrix_"))
+    if sub.find("field", f"sources/{stem}"):
+        raise ValueError(f"{p.name}: the subject already holds sources/{stem}")
+    rows = f"sources/{stem}_rows"
+    rid = sub.manifold(name=rows.rsplit("/", 1)[-1], path=rows, type="points", n_vertices=len(names), topology={"kind": "none", "rank": 0},
+                       session=session, comment=f"the {len(names)} rows of {comment} — element k is row k")
+    labelling(sub, f"{rows}_names", np.arange(len(names)), names, manifold_id=rid, dictionary=f"{stem}_rows", session=session,
+              description=f"the names of the rows of {comment}")
+    info = _series(sub, stem, v, t, rows_id=rid, session=session, comment=comment, source=p.name, unit=None, producer={},
+                   description=f"{comment} — {len(names)} rows over time", what=p.name)
+    return {"name": stem, "id": info["id"], "rows": len(names), "kind": comment, "n_samples": int(t.size), "spacing_s": info["spacing_s"]}
 
 
 def _static_column(values: Any, name: str) -> np.ndarray:
@@ -178,7 +244,9 @@ def export_region_map(sub: Subject, matrix_file: str | Path, *, bst_root: str | 
 
 
 def export_map(sub: Subject, path: str | Path, *, bst_root: str | Path, session: str | None) -> dict[str, Any]:
-    """A static map file of either kind: ``matrix_*`` a region map, else a source map."""
+    """A map file of any kind: ``matrix_*`` a matrix over time or a region map, else a source map (static or over time)."""
+    if Path(path).name.startswith("matrix_") and is_matrix_series(path):
+        return export_matrix_series(sub, path, session=session)
     f = export_region_map if Path(path).name.startswith("matrix_") else export_source_map
     return f(sub, path, bst_root=bst_root, session=session)
 

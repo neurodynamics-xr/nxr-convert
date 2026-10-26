@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.11**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.12**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). From 0.2.12 new subjects convert in parallel (`fragment --new`) and a map over time (an fMRI BOLD series, its confounds) is converted, not skipped. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.11 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.12 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -102,8 +102,13 @@ nxr-convert group    <protocol> --dataset <datastore>/<dataset>
 vertex) and every `matrix_*.mat` region map (scout extraction: one value per region of its `Atlas`) in `data/@default_study`,
 `data/@inter` or a `data/Group_analysis` condition whose `SurfaceFile` is a `@default_subject` surface. A map on a surface
 the template does not export itself (fsLR32k, fsaverage) brings that surface as a secondary one. A region map is a Field
-on the atlas's regions (element k is the region coded k; NaN where the file gives no value). Time-resolved maps are
-reported and skipped.
+on the atlas's regions (element k is the region coded k; NaN where the file gives no value).
+
+A map OVER TIME (0.2.12) — `Time` of more than two regular points, e.g. bst-fmri's `results_surface_fmri_*` BOLD series — is
+a Field on its surface × a time Line at the TR, stored as a recording is (sharded, its chunk grid and envelope). `subject`
+converts it in its condition with any `matrix_*.mat` over time there (the `matrix_confounds_fmri_*` regressors): a Field on a
+points manifold of its rows (named by a labelling, `<stem>_rows_names`) × the SAME time Line when the sampling matches. An
+irregular `Time` is reported and skipped.
 
 ### Adding to or removing from a subject
 
@@ -173,6 +178,19 @@ the subject's and the templates' real stores, so `atlas build` finds the `@defau
 fragment's subject in the dataset's database by the fragment's copy, adds shared rows it lacks (a dictionary the dataset
 already has under the same name is the dataset's; the fragment's references move to it), rewrites that subject's nodes'
 `zarr.json` from the merged rows, and removes no folder.
+
+A NEW subject (0.2.12) converts the same way, from an EMPTY fragment — the dataset's shared rows, no subject's:
+
+```bash
+nxr-convert fragment --dataset <datastore>/<dataset> --new --to <scratch_i>                       # one a job
+nxr-convert subject <protocol> --subject <sub_i> --dataset <scratch_i>/<dataset>                  # the store lands in the fragment
+nxr-convert merge --dataset <datastore>/<dataset> <scratch_1>/<dataset> … <scratch_N>/<dataset>   # one call, every fragment
+```
+
+`merge` moves each new store into the dataset (a rename on the same filesystem, else a copy, then the fragment's copy removed —
+the result says which per subject) and refuses a subject name the dataset already holds. `--replace` re-converts one: the old
+store is moved aside (`<store>.replaced-<UTC time>`, never deleted) and its rows replaced. A failed merge rolls its database
+back and puts the store back in its fragment. The merged dataset equals a serial build, ids and timestamps aside (tested).
 
 `migrate --from <nxr.sqlite> --dataset <datastore>/<dataset>` brings a schema-48 database (one shared by many subjects,
 written before the dataset layout) into the dataset folder as `dataset.sqlite` at schema 49: the `status` column added

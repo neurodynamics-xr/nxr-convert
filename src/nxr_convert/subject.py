@@ -154,7 +154,7 @@ def compose_subject(sub: Subject, root: str | Path, subject: str, *, emit: Emit,
     from .fibers import export_fibers, is_fibers_file
     from .mri import import_subjectimages
     from .naming import surface_node_name
-    from .results_map import export_source_map, find_source_maps
+    from .results_map import export_matrix_series, export_source_map, find_source_maps, is_matrix_series
     from .surface import export_surface, folder_for_surface
 
     root = Path(root)
@@ -188,12 +188,15 @@ def compose_subject(sub: Subject, root: str | Path, subject: str, *, emit: Emit,
     # 3. source maps, in every condition folder (map-only ones included)
     for cond in folders:
         for home in (root / "data" / subject / cond, root / "data" / subject / f"@raw{cond}"):
-            for mf in find_source_maps(home):
-                try:
-                    info = export_source_map(sub, mf, bst_root=root, session=cond)
+            series = [q for q in sorted(home.glob("matrix_*.mat")) if not q.name.startswith("._") and is_matrix_series(q)] if home.is_dir() else []
+            for mf, f in [*((q, export_source_map) for q in find_source_maps(home)), *((q, export_matrix_series) for q in series)]:
+                mark = sub.mark()
+                try:                                                    # the maps first: a confounds matrix takes its BOLD map's time Line
+                    info = f(sub, mf, bst_root=root, session=cond) if f is export_source_map else f(sub, mf, session=cond)
                     summary["maps"].append(info["name"])
                     emit({"stage": "map", **{k: v for k, v in info.items() if k != "id"}})
                 except (ValueError, FileNotFoundError) as e:
+                    sub.rollback_to(mark)
                     skip(mf.name, str(e))
     # 4. fibres — ends on the subject's cortex (iCortex), connectomes per assigned atlas
     fibre_files = [p for p in sorted(anat.glob("tess_*.mat")) if is_fibers_file(p) and not p.name.startswith("._")]
