@@ -560,9 +560,10 @@ CREATE INDEX selection_space ON selection (space_id);
 CREATE INDEX selection_set ON selection (member_of_id);
 
 -- ── selection_element ───────────────────────────────────────────────────────
--- A labelling's code per element, or a subset's picked elements (code null) — rows when the
--- manifold is points or a surface. "Vertices in the left precentral gyrus" is a join from
--- here to the dictionary entry.
+-- NO LONGER WRITTEN (Diellor, 2026-10-26: "that should be data on file and not a database entry"): a
+-- labelling's codes and a subset's picks are the selection's ARRAY (`array_path`); its row counts them
+-- (n_elements, a partition's n_members). Kept, empty, so this schema version's databases are unchanged;
+-- an older database's rows are a copy nothing reads (publish-database.mjs drops them).
 CREATE TABLE selection_element (
   selection_id TEXT NOT NULL REFERENCES selection (id) ON DELETE CASCADE,
   element      INTEGER NOT NULL,         -- the vertex / channel index on the manifold

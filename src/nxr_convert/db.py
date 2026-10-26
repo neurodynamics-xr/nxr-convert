@@ -351,6 +351,12 @@ def write_zarr_json(file: Path, attributes: str) -> None:
     file.write_text(zarr_json_text(doc, attributes), encoding="utf-8")
 
 
+def owns(dataset_path: str | None, path: str) -> bool:
+    """whether a datastore-relative ``path`` is the dataset's own folder or inside it (no ``..``) — what a delete may remove"""
+    parts = Path(path).parts
+    return bool(dataset_path) and ".." not in parts and not Path(path).is_absolute() and parts[:len(Path(dataset_path).parts)] == Path(dataset_path).parts
+
+
 def drain(db: Database, root: str | Path) -> dict[str, list[str]]:
     """Drain ``sync_job`` against the datastore at ``root`` — ``syncPending`` exactly: pending jobs in id order; an upsert
     writes the node's canonical zarr.json from its view's text (creating the group, and the groups above it, when absent);
@@ -361,8 +367,15 @@ def drain(db: Database, root: str | Path) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {"written": [], "removed": [], "skipped": []}
     root = Path(root)
 
+    own = (db.one("SELECT path FROM dataset LIMIT 1") or {}).get("path")
+
     def sync(job: dict[str, Any]) -> None:
         if job["op"] == "delete":
+            # ONLY INSIDE THIS DATASET'S FOLDER (2026-10-26: a job queued while the dataset had another path deleted a co-located
+            # dataset's subject stores): a path that is not the dataset's own folder or below it is REFUSED, left in place
+            if job["path"] and not owns(own, job["path"]):
+                out["skipped"].append(job["path"])
+                return _finish(db, job["id"], f"refused: {job['path']} is outside this dataset's folder ({own})")
             if job["path"] and (root / job["path"]).exists():
                 remove_folder(root / job["path"])
             if job["path"]:

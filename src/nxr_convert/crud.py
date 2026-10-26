@@ -821,8 +821,8 @@ class Subject:
                   meta: ArrayMeta | None = None, elements: np.ndarray | None = None, picked: bool = False,
                   spans: Sequence[tuple[float, float, int | None]] | None = None, extents: Sequence[tuple[int, float, float]] = (),
                   measurements: Sequence[dict] = (), populate: Populate | None = None, dense: bool = False, **cols) -> str:
-        """A SELECTION node. ``data``: its per-element array (codes of a partition, indices of a subset) at its path —
-        ``elements`` rows from it unless ``elements=False``; ``spans``: (start, stop, code) member rows (D87);
+        """A SELECTION node. ``data``: its per-element array (codes of a partition, indices of a subset) at its path — the row
+        counts it (``n_elements``, a partition's ``n_members``) unless ``elements=False``; nothing per element is a row; ``spans``: (start, stop, code) member rows (D87);
         ``measurements``: its own (array-backed or valued) rows."""
         sid = cols.pop("id", None) or uuid7()
         if data is not None and meta is None:
@@ -835,16 +835,13 @@ class Subject:
                    **({"array_path": path} if data is not None and path else {}), **self._prov(cols.pop("created_utc", None)), **cols}
             self.db.insert("selection", row)
             if el is not None:
+                # THE CODES ARE THE ARRAY'S (Diellor, 2026-10-26: "data on file, not a database entry"): no per-element rows — the
+                # row carries the counts only, a subset its picked elements, a partition its elements and its distinct codes (D48)
                 codes = np.asarray(el).ravel()
                 if picked:
-                    self.db.conn.executemany("INSERT INTO selection_element (selection_id, element, code) VALUES (?, ?, NULL)",
-                                             ((sid, c) for c in codes.astype(np.int64, copy=False).tolist()))
                     self.db.execute("UPDATE selection SET n_elements = ? WHERE id = ?", int(codes.size), sid)
                 else:
-                    self.db.conn.executemany("INSERT INTO selection_element (selection_id, element, code) VALUES (?, ?, ?)",
-                                             ((sid, i, c) for i, c in enumerate(codes.astype(np.int64, copy=False).tolist())))
-                    self.db.execute("UPDATE selection SET n_elements = ?, n_members = (SELECT count(DISTINCT code) FROM "
-                                    "selection_element WHERE selection_id = ?) WHERE id = ?", int(codes.size), sid, sid)
+                    self.db.execute("UPDATE selection SET n_elements = ?, n_members = ? WHERE id = ?", int(codes.size), int(np.unique(codes).size), sid)
             if spans is not None:
                 self.db.conn.executemany("INSERT INTO selection_span (selection_id, ordinal, start, stop, code) VALUES (?, ?, ?, ?, ?)",
                                          ((sid, k, float(a), float(b), None if c is None else int(c)) for k, (a, b, c) in enumerate(spans)))

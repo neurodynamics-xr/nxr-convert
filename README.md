@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.9**, which writes **database schema 49**. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.11**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.9 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.11 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -116,6 +116,8 @@ nxr-convert map     --dataset D --subject S --file results_*.mat|matrix_*.mat â€
 nxr-convert surface --dataset D --subject S --fs-dir <FreeSurfer subject dir> --name cortex_pial [--scs-from tess_*.mat]
 nxr-convert hodge   --dataset D --subject S --from <dir> [--nsp-subject S] [--replace] [--surface NAME]
 nxr-convert interp  --dataset D --subject S --from SRC --to DST [--replace]
+nxr-convert carry-inverse --dataset D --subject S --from <dataset> --kernel NAME --session C   # 0.2.11: a kernel from another store of the subject
+nxr-convert resample --dataset D --subject S --recording NAME --to HZ [--name N]   # 0.2.10: a stored recording resampled, beside it
 nxr-convert remove  --dataset D --subject S [--node <store path>]   # the subject, or one node of it
 ```
 

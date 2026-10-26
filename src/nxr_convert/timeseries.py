@@ -106,6 +106,38 @@ def _recording(sub: Subject, name: str, *, n_chan: int, n_samples: int, sfreq: f
             "events": ev["n_events"], "event_types": ev["n_types"], "bad_segments": ev["bad_segments"]}
 
 
+def add_resampled(sub: Subject, recording: str, to: float, *, name: str | None = None, block: int = BLOCK, progress=None) -> dict:
+    """A STORED recording resampled to ``to`` Hz (``resample_rows``: ``resample_poly``, anti-aliased, channels in groups) as a recording of its own
+    beside it — on the same channels and session, with its own Time Line, chunk grid and envelope, its producer naming what it was resampled from.
+    No source protocol is read: the stored rows are the input. The original's events and flags are not carried."""
+    import json
+    import zarr
+    db = sub.db
+    rec = db.one("SELECT * FROM field WHERE subject_id = ? AND kind = 'recording' AND name = ? AND status = 'complete'", sub.id, recording)
+    if not rec:
+        raise KeyError(f"{sub.row['name']}: no recording {recording!r}")
+    ch_id, t_id = [r["manifold_id"] for r in db.all("SELECT d.manifold_id FROM manifold p JOIN geometry_dimension d ON d.geometry_id = p.geometry_id "
+                                                     "WHERE p.id = ? ORDER BY d.ordinal", rec["manifold_id"])]
+    dim = db.one("SELECT d.* FROM manifold m JOIN geometry_dimension d ON d.geometry_id = m.geometry_id WHERE m.id = ?", t_id)
+    fs, t0 = 1.0 / float(dim["spacing"]), float(dim["origin"] or 0.0)
+    new = name or f"{rec['name']}_{int(to) if float(to).is_integer() else to}Hz"
+    if db.one("SELECT id FROM field WHERE subject_id = ? AND name = ?", sub.id, new):
+        raise FileExistsError(f"{sub.row['name']}: a field {new!r} exists")
+    a = zarr.open_array(str(sub.at(rec["path"])), mode="r")
+    n_chan, n_t = a.shape
+    x = resample_rows(lambda c0, c1: a[c0:c1], n_chan, n_t, fs, float(to))
+    if progress:
+        progress({"stage": "resampled", "name": new, "from": fs, "to": float(to), "samples": int(x.shape[1])})
+    try:
+        kind = json.loads(rec["producer_json"] or "{}").get("kind", "sensor")
+    except ValueError:
+        kind = "sensor"
+    producer = {"resampled_from": {"field": rec["id"], "name": rec["name"]}, "resample": {"from": fs, "to": float(to), "method": "resample_poly"}}
+    return _recording(sub, new, n_chan=n_chan, n_samples=int(x.shape[1]), sfreq=float(to), t0=t0, session=rec["session"], channels_id=ch_id,
+                      write=lambda arr: _write_blocks(arr, x, block), flags=None, events=None, channel_names=None,
+                      comment=f"{rec['name']} resampled to {to:g} Hz", kind=kind, source="resampled", producer=producer, progress=progress)
+
+
 def export_raw_timeseries(sub: Subject, name: str, sfile: dict, channel_flag: np.ndarray | None, *, session: str,
                           channels_id: str, comment: str | None = None, bst_path: str | Path | None = None,
                           block: int = BLOCK, channel_names: list[str] | None = None, progress=None,

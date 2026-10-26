@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .crud import Subject
+from .crud import Subject, jdump
 from .inverse import export_forward, export_inverse
 from .matio import load_mat, load_mat_vars, struct_rows
 from .naming import (channel_node_name, claim_node_name, headmodel_node_name, kernel_node_name, recording_node_name,
@@ -234,6 +234,79 @@ def _kernel_head_model(kernel_file: Path, kern: dict, bst_root: Path, progress: 
         _emit(progress, stage="stale-headmodel-link", file=str(kernel_file), link=link, resolved=spatial[0].name)
         return spatial[0]
     raise FileNotFoundError(f"{kernel_file.name}: head model {link} is missing and {len(spatial)} candidates are beside it")
+
+
+def _member_names(db, at: Callable[[str], Path], channels_id: str) -> list[str]:
+    """a points manifold's member names — its ``_names`` selection's codes read with their dictionary"""
+    import zarr
+    sel = db.one("SELECT * FROM selection WHERE manifold_id = ? AND name LIKE '%\\_names' ESCAPE '\\' AND member_of_id IS NULL", channels_id)
+    if sel is None:
+        raise ValueError(f"{channels_id}: no member names")
+    codes = np.asarray(zarr.open_array(str(at(sel["array_path"] or sel["path"])), mode="r")[...]).ravel()
+    by = {int(e["code"]): str(e["name"]) for e in db.all("SELECT code, name FROM dictionary_entry WHERE dictionary_id = ?", sel["dictionary_id"])}
+    return [by.get(int(c), str(c)) for c in codes]
+
+
+def carry_inverse(sub: Subject, *, src: str | Path, kernel: str, session: str, src_subject: str | None = None, channels_id: str | None = None,
+                  surface_id: str | None = None, forward_id: str | None = None, name: str | None = None, progress: Progress | None = None) -> dict:
+    """ONE inverse kernel CARRIED from another store of the same subject (an earlier import), written as a conversion writes one
+    (``export_inverse``): its matrix, noise covariance, whitener and source geometry; its channels RE-INDEXED BY NAME onto this session's
+    channels; the head model the session's. The cortex must be the same mesh (the positions within 1 µm). The source's method record
+    (params_json, producer_json) is kept verbatim, with where it was carried from. Nothing of the source is written."""
+    import zarr
+    from .crud import open_dataset
+    src = Path(src)
+    with open_dataset(src, lock=False) as sds:
+        sdb = sds.db
+        so = sdb.one("SELECT * FROM subject WHERE name = ?", src_subject or sub.name)
+        if so is None:
+            raise KeyError(f"{src}: no subject {src_subject or sub.name}")
+        sroot = src / so["path"]
+        k = sdb.one("SELECT * FROM operator WHERE subject_id = ? AND name = ? AND kind = 'inverse kernel'", so["id"], kernel)
+        if k is None:
+            raise KeyError(f"{src}/{so['name']}: no inverse kernel {kernel}")
+        arr = lambda path: np.asarray(zarr.open_array(str(sroot / path), mode="r")[...])
+        W = arr(k["path"])
+        old_set = _member_names(sdb, lambda p: sroot / p, k["from_manifold_id"])
+        sel = sdb.read("selection", k["from_selection_id"]) if k["from_selection_id"] else None
+        picked = arr(sel["array_path"] or sel["path"]).astype(np.int64).ravel() if sel else np.arange(W.shape[1])
+        names = [old_set[i] for i in picked]
+        part = lambda kind, n: sdb.one(f"SELECT * FROM {kind} WHERE subject_id = ? AND name = ?", so["id"], n)
+        ncov, whit, rr = part("operator", f"{kernel}_noise_cov"), part("operator", f"{kernel}_whitener"), part("field", f"{kernel}_source_rr")
+        ncov, whit, rr = (arr(x["path"]) if x else None for x in (ncov, whit, rr))
+        s_surf = sdb.read("manifold", k["to_manifold_id"])
+        s_pos = arr(sdb.read("geometry", s_surf["geometry_id"])["positions_path"])
+        meta = {"params_json": k["params_json"], "producer_json": k["producer_json"], "comment": k["comment"], "to_value_type": k["to_value_type"], "id": k["id"]}
+        src_where = {"dataset": str(src), "subject": so["name"], "operator": k["id"], "name": kernel}
+    db = sub.db
+    if channels_id is None:
+        ch = db.one("SELECT id FROM manifold WHERE subject_id = ? AND session = ? AND type = 'points' AND path LIKE 'timeseries/%' ORDER BY path LIMIT 1", sub.id, session)
+        if ch is None:
+            raise ValueError(f"{sub.name}: no channels in session {session}")
+        channels_id = ch["id"]
+    new_set = _member_names(db, sub.at, channels_id)
+    missing = [n for n in names if n not in new_set]
+    if missing:
+        raise ValueError(f"{kernel}: {len(missing)} of its channels are not in this session's ({', '.join(missing[:5])} …)")
+    if surface_id is None:
+        surface_id = db.one("SELECT id FROM manifold WHERE subject_id = ? AND is_primary = 1", sub.id)["id"]
+    surf = db.read("manifold", surface_id)
+    pos = np.asarray(zarr.open_array(str(sub.at(db.read("geometry", surf["geometry_id"])["positions_path"])), mode="r")[...])
+    if pos.shape != s_pos.shape or float(np.max(np.abs(pos - s_pos))) > 1e-6:
+        raise ValueError(f"{kernel}: the cortex is not the source's ({surf['name']} {pos.shape} against {s_surf['name']} {s_pos.shape})")
+    if forward_id is None:
+        g = db.one("SELECT id FROM operator WHERE subject_id = ? AND kind = 'forward' AND session = ? ORDER BY name LIMIT 1", sub.id, session)
+        forward_id = g["id"] if g else None
+    free = meta["to_value_type"] == "vector3"
+    kern = {"ImagingKernel": W, "GoodChannel": np.array([new_set.index(n) + 1 for n in names]), "nComponents": 3 if free else 1,
+            "Options": {"NoiseCovMat": {"NoiseCov": ncov}} if ncov is not None else {}, **({"Whitener": whit} if whit is not None else {}),
+            **({"Comment": meta["comment"]} if meta["comment"] else {})}
+    info = export_inverse(sub, kern, session=session, name=name or kernel, channels_id=channels_id, surface_id=surface_id, forward_id=forward_id,
+                          channel_names=new_set, n_vertices=int(surf["n_vertices"]), grid_loc=rr[::3] if (rr is not None and free) else rr)
+    producer = {**json.loads(meta["producer_json"] or "{}"), "carried_from": src_where}
+    db.execute("UPDATE operator SET params_json = ?, producer_json = ? WHERE id = ?", meta["params_json"], jdump(producer), info["id"])
+    _emit(progress, stage="inverse", carried_from=src_where, **info)
+    return {**info, "carried_from": src_where}
 
 
 def add_inverse(sub: Subject, *, kernel_file: str | Path, session: str, bst_root: str | Path, channels_id: str | None = None,

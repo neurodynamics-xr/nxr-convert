@@ -113,7 +113,7 @@ def test_create_lays_out_then_populates_then_completes_every_entity(ds):
     assert (json.loads(row["chunk_shape_json"]), json.loads(row["codecs_json"]), row["fill_value_json"]) == \
         (doc["chunk_grid"]["configuration"]["chunk_shape"], doc["codecs"], "0")
     assert np.array_equal(zarr.open_array(str(ds.root / store / "sources/pet"))[:], np.arange(4))
-    assert ds.db.value("SELECT count(*) FROM selection_element WHERE selection_id = ?", sid) == 4
+    assert ds.db.value("SELECT count(*) FROM selection_element") == 0 and ds.db.read("selection", sid)["n_elements"] == 4   # the codes are the array's: no row an element
     assert ds.db.read("selection", sid)["n_members"] == 2 and ds.db.read("selection", sp)["n_members"] == 2
     assert text_parity(ds.db, ds.root)["mismatched"] == 0
 
@@ -219,3 +219,20 @@ def test_the_catalog_is_rewritten_atomically(ds, tmp_path):
     create_dataset(tmp_path / "store", "other").close()
     cat = write_catalog(tmp_path / "store")
     assert [d["path"] for d in cat["datasets"]] == ["ds", "other"] and not (tmp_path / "store" / "catalog.json.tmp").exists()
+
+
+def test_a_delete_job_never_reaches_outside_its_own_dataset(ds):
+    """2026-10-26: a job queued while the dataset had another path deleted a co-located dataset's subject stores. A delete whose
+    path is not the dataset's own folder (or below it) is refused and left in place; one inside it is carried out."""
+    from nxr_convert.db import owns
+    root = ds.root
+    (root / "other" / "sub-01.nxr.zarr").mkdir(parents=True)            # a neighbour dataset's store
+    (root / "ds" / "gone.nxr.zarr").mkdir(parents=True)                 # this dataset's own
+    for i, p in enumerate(("other/sub-01.nxr.zarr", "ds/../other/sub-01.nxr.zarr", "ds/gone.nxr.zarr")):
+        ds.db.execute("INSERT INTO sync_job (table_name, row_id, op, path) VALUES ('subject', ?, 'delete', ?)", f"x{i}", p)
+    out = drain(ds.db, ds.root)
+    assert (root / "other" / "sub-01.nxr.zarr").exists() and not (root / "ds" / "gone.nxr.zarr").exists()
+    assert out["removed"] == ["ds/gone.nxr.zarr"] and sorted(out["skipped"]) == ["ds/../other/sub-01.nxr.zarr", "other/sub-01.nxr.zarr"]
+    errs = [r["error"] for r in ds.db.all("SELECT error FROM sync_job WHERE op = 'delete' ORDER BY id")]
+    assert errs[0].startswith("refused") and errs[1].startswith("refused") and errs[2] is None
+    assert owns("ds", "ds") and owns("ds", "ds/a/b") and not owns("ds", "dsx/a") and not owns("ds", "/ds/a") and not owns(None, "ds/a")

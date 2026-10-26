@@ -11,12 +11,16 @@
     nxr-convert surface  --dataset D --subject S --file tess_*.mat … [--bst-root P]  add surfaces
     nxr-convert mri      --dataset D --subject S --anat <anat dir> [--only N …]      add MRI volumes
     nxr-convert inverse  --dataset D --subject S --file results_*KERNEL*.mat --session C --bst-root P [--channels-id …]
+    nxr-convert carry-inverse --dataset D --subject S --from <dataset> --kernel NAME --session C   an inverse kernel from another store of the subject
+    nxr-convert resample --dataset D --subject S --recording NAME --to HZ [--name N]  a stored recording resampled, beside it (``timeseries.py``)
     nxr-convert surface  --dataset D --subject S --fs-dir <FreeSurfer subject dir> --name N [--scs-from tess_*.mat]
                                                                                       add FreeSurfer's lh/rh.pial as one surface
     nxr-convert hodge    --dataset D --subject S --from <nsp rheome-hodge-dirac dir> [--nsp-subject S] [--replace] [--surface NAME]
                                                                                       add the Hodge–Dirac eigenmodes of the primary
                                                                                       (or of the named surface, suffixed) (``hodge.py``)
     nxr-convert interp   --dataset D --subject S --from SRC --to DST [--replace]     the operator DST ← SRC through the spheres (``interp.py``)
+    nxr-convert templates <references-fsaverage-ico7 dir> --dataset D [--subject fsaverage] [--trk hcp1065.trk]
+                                                                                      the templates-and-references dataset (``templates.py``)
     nxr-convert map      --dataset D --subject S --file results_*.mat|matrix_*.mat … --bst-root P [--session C]
                                                                                       add static maps (surface or region)
     nxr-convert remove   --dataset D --subject S [--node PATH]                      delete a subject, or one node of it
@@ -169,6 +173,20 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--subject", required=True)
     pr.add_argument("--node", default=None)
 
+    pci = sub.add_parser("carry-inverse", help="an inverse kernel CARRIED from another store of the same subject (an earlier import): its channels by name, the same cortex checked")
+    pci.add_argument("--dataset", required=True)
+    pci.add_argument("--subject", required=True)
+    pci.add_argument("--from", dest="src", required=True, help="the other dataset folder (<datastore>/<dataset>)")
+    pci.add_argument("--from-subject", default=None, help="the subject's name there (default: the same)")
+    pci.add_argument("--kernel", required=True, help="the kernel's name there")
+    pci.add_argument("--session", required=True, help="this subject's session it maps (its channels, its head model)")
+    pci.add_argument("--name", default=None)
+    prs = sub.add_parser("resample", help="a STORED recording resampled to HZ (resample_poly) as a recording beside it — no protocol read")
+    prs.add_argument("--dataset", required=True)
+    prs.add_argument("--subject", required=True)
+    prs.add_argument("--recording", required=True, help="the recording's field name")
+    prs.add_argument("--to", type=float, required=True, metavar="HZ")
+    prs.add_argument("--name", default=None, help="the new recording's name (default: <recording>_<HZ>Hz)")
     pq = sub.add_parser("qc", help="sensor QC of a subject's recordings: the PSD Field, its measures and qc_flag, meg-qc's metrics")
     pq.add_argument("--dataset", required=True)
     pq.add_argument("--subject", required=True)
@@ -185,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
     pme = sub.add_parser("merge", help="fold fragments back into their shared dataset, serially, their nodes resynced")
     pme.add_argument("--dataset", required=True)
     pme.add_argument("fragments", nargs="+")
+    pt2 = sub.add_parser("templates", help="build or extend the templates-and-references dataset: fsaverage (ico7) as the template, "
+                                           "reference maps (nsp's references-fsaverage-ico7 folder) as Fields; re-run to add maps")
+    pt2.add_argument("source", help="the references-fsaverage-ico7 folder")
+    pt2.add_argument("--dataset", required=True, help="<datastore>/<dataset>, made if absent")
+    pt2.add_argument("--subject", default="fsaverage")
+    pt2.add_argument("--trk", default=None, help="hcp1065.trk (DSI Studio): add the streamlines and their ends")
 
     from .atlas.cli import add_parser as _add_atlas_parser
     _add_atlas_parser(sub)
@@ -221,6 +245,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         _print({"stage": "result", **out})
         return 0
+    if a.cmd == "templates":
+        from .templates import build
+        try:
+            _print({"stage": "result", **build(a.source, a.dataset, subject=a.subject, trk=a.trk, log=lambda *m: None)})
+            return 0
+        except Exception as e:  # noqa: BLE001
+            _print({"stage": "error", "message": f"{type(e).__name__}: {e}"})
+            return 1
     try:
         return _run(a)
     except Exception as e:  # noqa: BLE001 — the UI reads stage:error lines
@@ -322,6 +354,16 @@ def _run(a) -> int:
             from .hodge import add_hodge
             with sub.composition():
                 info = add_hodge(sub, a.src, sub=a.nsp_subject, replace=a.replace, surface=a.surface)
+            _print({"stage": "result", **info})
+        elif a.cmd == "carry-inverse":
+            from .convert import carry_inverse
+            with sub.composition():
+                info = carry_inverse(sub, src=a.src, kernel=a.kernel, session=a.session, src_subject=a.from_subject, name=a.name, progress=_print)
+            _print({"stage": "result", **info})
+        elif a.cmd == "resample":
+            from .timeseries import add_resampled
+            with sub.composition():
+                info = add_resampled(sub, a.recording, a.to, name=a.name, progress=_print)
             _print({"stage": "result", **info})
         elif a.cmd == "qc":
             from .qc import add_qc
