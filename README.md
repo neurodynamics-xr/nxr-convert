@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.13**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). From 0.2.12 new subjects convert in parallel (`fragment --new`) and a map over time (an fMRI BOLD series, its confounds) is converted, not skipped. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.14**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). From 0.2.12 new subjects convert in parallel (`fragment --new`) and a map over time (an fMRI BOLD series, its confounds) is converted, not skipped. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.13 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.14 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding

@@ -42,11 +42,20 @@ from .naming import sanitize_node_name, surface_node_name
 from .surface import export_surface, folder_for_surface
 
 
+def _text(v: Any) -> str:
+    """an optional MATLAB text field as a str: '' when absent or empty (a ``[]`` field loads as an EMPTY ndarray, whose truth value raises)"""
+    if v is None or (isinstance(v, np.ndarray) and v.size == 0):
+        return ""
+    if isinstance(v, np.ndarray):
+        v = v.ravel()[0]
+    return str(v).strip()
+
+
 def is_source_map(mat: dict) -> bool:
     """A results file that holds VALUES on its surface: a non-empty ``ImageGridAmp`` and no
     ``ImagingKernel``. Recognised by content, not by ``DataType`` — Brainstorm writes that
     field on timefreq files but not on a projected map (measured on a research cohort's projected PET)."""
-    dt = str(mat.get("DataType", "") or "")
+    dt = _text(mat.get("DataType"))
     return (dt in ("", "results")
             and mat.get("ImageGridAmp") is not None and bool(np.size(mat.get("ImageGridAmp")))
             and not np.size(mat.get("ImagingKernel") if mat.get("ImagingKernel") is not None else []))
@@ -72,19 +81,19 @@ def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str |
     timed = t.size > 2
     if not timed:
         amp = _static_column(amp, p.name)[:, None]
-    surface_rel = str(m.get("SurfaceFile", ""))
+    surface_rel = _text(m.get("SurfaceFile"))
     surf, spath, _ = _surface_of(sub, surface_rel, bst_root=bst_root, what=p.name)
     sname = spath.rsplit("/", 1)[-1]
     if surf["n_vertices"] != amp.shape[0]:
         raise ValueError(f"{p.name}: {amp.shape[0]} values for a {surf['n_vertices']}-vertex surface ({sname})")
-    comment = str(m.get("Comment", "")) or p.stem
+    comment = _text(m.get("Comment")) or p.stem
     stem = sanitize_node_name(p.stem.removeprefix("results_"))
     node = f"sources/{stem}"
     if sub.find("field", node):
         raise ValueError(f"{p.name}: the subject already holds {node}")
     text = f"{stem} {comment}".lower()
     unit = "SUVR" if "suvr" in text else None
-    producer = {"surface": surface_rel, **({"display_units": str(m["DisplayUnits"])} if m.get("DisplayUnits") else {})}
+    producer = {"surface": surface_rel, **({"display_units": _text(m.get("DisplayUnits"))} if _text(m.get("DisplayUnits")) else {})}
     if timed:                                                        # a BOLD series: on the surface × its own time Line, stored as a recording is
         if amp.shape[1] != t.size:
             raise ValueError(f"{p.name}: {amp.shape[1]} columns for {t.size} time points")
@@ -99,19 +108,21 @@ def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str |
 
 
 def _series(sub: Subject, stem: str, x: np.ndarray, t: np.ndarray, *, rows_id: str, session: str | None, comment: str, source: str,
-            unit: str | None, producer: dict, description: str, what: str) -> dict:
-    """[rows × T] values on rows × a time Line — the Line another field of the session already has at the same sampling (a BOLD
-    map's, for its confounds), else its own — written by the recording writer (chunk grid, envelope)."""
+            unit: str | None, producer: dict, description: str, what: str, share: str | None = None) -> dict:
+    """[rows × T] values on rows × a time Line — its own, or (``share``, a confounds matrix's name after its first word) the Line of the
+    session's series whose name ends with it at the same sampling (``confounds_fmri_run_1`` → ``surface_fmri_run_1``'s) — written by the
+    recording writer (chunk grid, envelope)."""
     from .grid import BLOCK
     from .timeseries import _recording, _write_blocks
     dt = np.diff(t)
     if not (dt[0] > 0 and np.allclose(dt, dt[0], rtol=1e-6, atol=0)):
         raise ValueError(f"{what}: its Time is not a regular sampling — a time Line needs one")
     t0, step = float(t[0]), float(dt[0])
-    line = sub.db.one("SELECT m.id FROM manifold m JOIN geometry_dimension d ON d.geometry_id = m.geometry_id WHERE m.subject_id = ? "
-                      "AND m.type = 'line' AND m.session IS ? AND d.n_vertices = ? AND abs(d.spacing - ?) <= 1e-9 * ? "
-                      "AND abs(coalesce(d.origin, 0) - ?) <= 1e-9 * ? AND m.path LIKE 'sources/%'",
-                      sub.id, session, int(t.size), step, step, t0, step)
+    line = share and sub.db.one(
+        "SELECT m.id FROM manifold m JOIN geometry_dimension d ON d.geometry_id = m.geometry_id WHERE m.subject_id = ? AND m.type = 'line' "
+        "AND m.session IS ? AND d.n_vertices = ? AND abs(d.spacing - ?) <= 1e-9 * ? AND abs(coalesce(d.origin, 0) - ?) <= 1e-9 * ? "
+        "AND m.path LIKE 'sources/%' AND m.path LIKE ? ESCAPE '\\'", sub.id, session, int(t.size), step, step, t0, step,
+        "%" + share.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "\\_time")
     xs = np.ascontiguousarray(x, dtype=np.float32)
     info = _recording(sub, stem, n_chan=xs.shape[0], n_samples=xs.shape[1], sfreq=1.0 / step, t0=t0, session=session, channels_id=rows_id,
                       write=lambda arr: _write_blocks(arr, xs, BLOCK), flags=None, events=None, channel_names=None, comment=comment,
@@ -127,7 +138,7 @@ def is_matrix_series(path: str | Path) -> bool:
 
 def export_matrix_series(sub: Subject, matrix_file: str | Path, *, session: str | None) -> dict[str, Any]:
     """A matrix over time (``Value`` [nRows × nTime], ``Description`` the row names): a Field on a ``points`` manifold of its rows
-    (named by a labelling) × the session's time Line at its sampling — so confounds share time with their BOLD map."""
+    (named by a labelling) × the Line of the BOLD map it names (``confounds_<x>`` → ``…_<x>``) — so confounds share time with their map."""
     p = Path(matrix_file)
     m = load_mat(p)
     v = np.asarray(m.get("Value"), dtype=np.float64)
@@ -135,7 +146,7 @@ def export_matrix_series(sub: Subject, matrix_file: str | Path, *, session: str 
     names = [str(d).strip() for d in np.atleast_1d(np.asarray(m.get("Description"), dtype=object)).ravel()]
     if v.ndim != 2 or v.shape != (len(names), t.size):
         raise ValueError(f"{p.name}: Value {v.shape} for {len(names)} names × {t.size} time points")
-    comment = str(m.get("Comment", "")) or p.stem
+    comment = _text(m.get("Comment")) or p.stem
     stem = sanitize_node_name(p.stem.removeprefix("matrix_"))
     if sub.find("field", f"sources/{stem}"):
         raise ValueError(f"{p.name}: the subject already holds sources/{stem}")
@@ -145,7 +156,7 @@ def export_matrix_series(sub: Subject, matrix_file: str | Path, *, session: str 
     labelling(sub, f"{rows}_names", np.arange(len(names)), names, manifold_id=rid, dictionary=f"{stem}_rows", session=session,
               description=f"the names of the rows of {comment}")
     info = _series(sub, stem, v, t, rows_id=rid, session=session, comment=comment, source=p.name, unit=None, producer={},
-                   description=f"{comment} — {len(names)} rows over time", what=p.name)
+                   description=f"{comment} — {len(names)} rows over time", what=p.name, share=stem.split("_", 1)[-1])
     return {"name": stem, "id": info["id"], "rows": len(names), "kind": comment, "n_samples": int(t.size), "spacing_s": info["spacing_s"]}
 
 
@@ -205,7 +216,7 @@ def atlas_regions(sub: Subject, cortex_path: str, cortex_file: str | Path, atlas
 def is_region_map(path: str | Path) -> bool:
     """A ``matrix_*.mat`` that names the atlas and the surface its rows are regions of (scout extraction's output)."""
     v = load_mat_vars(path, ["Atlas", "SurfaceFile"])
-    return bool(v.get("SurfaceFile")) and bool(struct_rows(v.get("Atlas"), "Name"))
+    return bool(_text(v.get("SurfaceFile"))) and bool(struct_rows(v.get("Atlas"), "Name"))
 
 
 def export_region_map(sub: Subject, matrix_file: str | Path, *, bst_root: str | Path, session: str | None) -> dict[str, Any]:
@@ -219,7 +230,7 @@ def export_region_map(sub: Subject, matrix_file: str | Path, *, bst_root: str | 
     labels = [str(d).split(" @ ")[0].strip() for d in np.atleast_1d(np.asarray(m.get("Description"), dtype=object)).ravel()]
     if len(labels) != values.size:
         raise ValueError(f"{p.name}: {values.size} values for {len(labels)} region labels")
-    surf, spath, surface_file = _surface_of(sub, str(m.get("SurfaceFile", "")), bst_root=bst_root, what=p.name)
+    surf, spath, surface_file = _surface_of(sub, _text(m.get("SurfaceFile")), bst_root=bst_root, what=p.name)
     aname = str(atlas.get("Name", ""))
     regions = atlas_regions(sub, spath, surface_file, aname)
     if regions is None:
@@ -230,7 +241,7 @@ def export_region_map(sub: Subject, matrix_file: str | Path, *, bst_root: str | 
         raise ValueError(f"{p.name}: regions not in the atlas '{aname}': {missing}")
     out = np.full(int(code_of.max()) + 1, np.nan, dtype=np.float32)
     out[[int(code_of[levels.index(lab)]) for lab in labels]] = values
-    comment = str(m.get("Comment", "")) or p.stem
+    comment = _text(m.get("Comment")) or p.stem
     stem = sanitize_node_name(p.stem.removeprefix("matrix_"))
     node = f"sources/{stem}"
     if sub.find("field", node):
@@ -239,7 +250,7 @@ def export_region_map(sub: Subject, matrix_file: str | Path, *, bst_root: str | 
     fid = sub.field(name=stem, path=node, kind=comment, manifold_id=rid, data=out, session=session, source=p.name, comment=comment,
                     description=f"{comment} — one value per {fam} region of {spath.rsplit('/', 1)[-1]} (NaN: not given)",
                     unit="SUVR" if "suvr" in f"{stem} {comment}".lower() else None,
-                    producer_json=jdump({"surface": str(m.get("SurfaceFile")), "atlas": aname, "regions": len(labels)}))
+                    producer_json=jdump({"surface": _text(m.get("SurfaceFile")), "atlas": aname, "regions": len(labels)}))
     return {"name": stem, "id": fid, "surface": spath.rsplit("/", 1)[-1], "atlas": fam, "regions": len(labels), "kind": comment}
 
 
@@ -262,7 +273,7 @@ def template_map_files(root: str | Path) -> list[Path]:
     for h in homes:
         cands = [*find_source_maps(h), *(sorted(q for q in h.glob("matrix_*.mat") if not q.name.startswith("._")) if h.is_dir() else [])]
         for q in cands:
-            sf = str(load_mat_vars(q, ["SurfaceFile"]).get("SurfaceFile") or "").replace("\\", "/")
+            sf = _text(load_mat_vars(q, ["SurfaceFile"]).get("SurfaceFile")).replace("\\", "/")
             if sf.startswith("@default_subject/") and (q.name.startswith("results_") or is_region_map(q)):
                 out.append(q)
     return out
