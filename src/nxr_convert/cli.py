@@ -211,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     pt2.add_argument("--dataset", required=True, help="<datastore>/<dataset>, made if absent")
     pt2.add_argument("--subject", default="fsaverage")
     pt2.add_argument("--trk", default=None, help="hcp1065.trk (DSI Studio): add the streamlines and their ends")
+    pt2.add_argument("--surface", default=None, help="the surface the maps go on (default: the subject's surface with each map's vertex count)")
 
     from .atlas.cli import add_parser as _add_atlas_parser
     _add_atlas_parser(sub)
@@ -250,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "templates":
         from .templates import build
         try:
-            _print({"stage": "result", **build(a.source, a.dataset, subject=a.subject, trk=a.trk, log=lambda *m: None)})
+            _print({"stage": "result", **build(a.source, a.dataset, subject=a.subject, trk=a.trk, surface=a.surface, log=lambda *m: None)})
             return 0
         except Exception as e:  # noqa: BLE001
             _print({"stage": "error", "message": f"{type(e).__name__}: {e}"})

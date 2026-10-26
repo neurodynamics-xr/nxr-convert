@@ -9,6 +9,9 @@ Input is the folder nsp builds (``references-fsaverage-ico7``): ``fsaverage/<fsa
     sources/<map id>                                             one Field per reference map on `pial` [L then R], NaN kept
     sources/hcp1065 · hcp1065_ends                               HCP-1065 streamlines (optional, --trk) and their ends
 
+ANY subject with its surfaces already (a dataset's default subject) takes the maps the same way (``--subject``): each map on its
+surface with that many vertices (or ``--surface``), no surface written — the folder's maps, however many.
+
 Re-runnable: every step skips what the subject already holds, so adding maps later is running it again. The Hodge-Dirac
 package is added afterwards with ``nxr-convert hodge`` (the primary ``pial`` is in metres, as nsp's solves are).
 """
@@ -113,8 +116,27 @@ Resampling to ico7 adds no resolution (README of `{source.name}`).
 """)
 
 
-def build(source: str | Path, dataset: str | Path, *, subject: str = SUBJECT, trk: str | Path | None = None, log=print) -> dict:
-    """Build or extend the templates dataset at ``<datastore>/<dataset>`` from ``source``."""
+def _target(sub: Subject, n: int, surface: str | None) -> dict:
+    """the surface a map of ``n`` values goes on: ``surface`` when named, else the subject's surface with ``n`` vertices — the
+    primary first, then a pial one; a sphere never; more than one left is refused (name it with --surface)"""
+    if surface:
+        m = sub.find("manifold", surface)
+        if m is None:
+            raise KeyError(f"{sub.row['name']}: no surface {surface!r}")
+        return m
+    c = [m for m in sub.db.all("SELECT * FROM manifold WHERE subject_id = ? AND type = 'surface' AND n_vertices = ? ORDER BY is_primary DESC, path",
+                               sub.id, n) if not m["path"].endswith("_sphere")]
+    c = [m for m in c if m["is_primary"]] or [m for m in c if "pial" in m["path"]] or c
+    if len(c) != 1:
+        raise ValueError(f"{sub.row['name']}: {len(c)} surfaces with {n} vertices ({', '.join(m['path'] for m in c) or 'none'}) — name one with --surface")
+    return c[0]
+
+
+def build(source: str | Path, dataset: str | Path, *, subject: str = SUBJECT, trk: str | Path | None = None, surface: str | None = None,
+          log=print) -> dict:
+    """Build or extend the templates dataset at ``<datastore>/<dataset>`` from ``source`` — or add the maps to ANY subject that
+    already has its surfaces (a dataset's default subject): each map goes on the surface with its vertex count (``_target``),
+    and no surface is written."""
     import nibabel.freesurfer as fs
     src = Path(source)
     ds_dir = Path(dataset)
@@ -125,13 +147,14 @@ def build(source: str | Path, dataset: str | Path, *, subject: str = SUBJECT, tr
         sub = (Subject.open(ds, subject, created_by=stamp()) if row else
                Subject.create(ds, subject, kind="template", folder=f"{subject}.nxr.zarr", source_format="freesurfer",
                               source_path=str(src / "fsaverage"), template_id=None, created_by=stamp()))
-        info = {"surfaces": [], "fields": [], "skipped": []}
+        info = {"surfaces": [], "fields": [], "skipped": [], "unplaced": []}
         with sub.composition():
             W = DefaultSubjectWriter(sub, log)
             fsdir = src / "fsaverage" / "fsaverage"
             prod = {"source": "FreeSurfer 7.4.1 fsaverage (fir)"}
             pial = sub.find("manifold", "sources/pial")
-            if pial is None:
+            own = pial is not None or not sub.db.one("SELECT 1 FROM manifold WHERE subject_id = ? AND is_primary = 1", sub.id)
+            if pial is None and own:                                     # a subject with no surfaces yet: fsaverage is written
                 for name, surf, primary in (("pial", "pial", True), ("white", "white", False), ("inflated", "inflated", False)):
                     pos, faces, sph, n_lh = _surface(src / "fsaverage", "fsaverage", surf, sphere=primary)
                     _, sid = W.surface(name, pos, faces, sph, n_lh, {**prod, "surface": surf, "units": "m"}, primary=primary)
@@ -149,15 +172,20 @@ def build(source: str | Path, dataset: str | Path, *, subject: str = SUBJECT, tr
                         W.surface(name, pos, faces, sph, n_lh, {**prod, "surface": surf, "units": "m", "density": res, "n_per_hemisphere": nv,
                                   "note": "sphere vertices are the first N of ico7's; pial/inflated coordinates are NOT ico7 subsets"})
                         info["surfaces"].append(name)
-            pial_id, n = pial["id"], int(pial["n_vertices"])
             for name, mid, prov, L, R in _map_files(src / "maps"):
                 path = f"sources/{sanitize_node_name(name)}"
                 if sub.find("field", path):
                     info["skipped"].append(name)
                     continue
                 v = np.concatenate([_gii(L), _gii(R)])
-                if v.size != n:
-                    raise ValueError(f"{name}: {v.size} values for a {n}-vertex pial")
+                try:
+                    on = pial if own and not surface else _target(sub, v.size, surface)
+                except ValueError as e:                                  # no single surface fits: reported, the others go on
+                    info["unplaced"].append({"map": name, "reason": str(e)})
+                    continue
+                if v.size != on["n_vertices"]:
+                    raise ValueError(f"{name}: {v.size} values for a {on['n_vertices']}-vertex {on['path']}")
+                pial_id = on["id"]
                 flag = " APPROXIMATE (volume projected by registration fusion)" if "APPROX" in str(prov.get("method_class", "")).upper() else ""
                 sub.field(name=sanitize_node_name(name), path=path, kind=prov.get("map") or name, manifold_id=pial_id, data=v, compress=True,
                           source=str(prov.get("source_paper") or ""), comment=prov.get("map"),
@@ -165,10 +193,12 @@ def build(source: str | Path, dataset: str | Path, *, subject: str = SUBJECT, tr
                                       f"{prov.get('method_class')}{flag}. Licence: {prov.get('licence')}. NaN = not given (e.g. medial wall).",
                           producer_json=jdump(prov))
                 info["fields"].append(name)
-            if trk and not sub.find("manifold", "sources/hcp1065"):
+            if trk and own and not sub.find("manifold", "sources/hcp1065"):
+                pial_id = pial["id"]
                 white = np.vstack([p for p, _ in _read_hemis(src / "fsaverage" / "fsaverage", "white")]) / 1000.0
                 info["hcp1065"] = _fibres(W, Path(trk), pial_id, white, white)
-        write_readme(src, ds_dir.parent, ds_dir.name, subject, info, list(_map_files(src / "maps")))
+        if own:                                                          # the templates datastore's README — never another datastore's
+            write_readme(src, ds_dir.parent, ds_dir.name, subject, info, list(_map_files(src / "maps")))
         return {"store": str(sub.store), "id": sub.id, **info}
     finally:
         ds.close()
