@@ -131,7 +131,8 @@ def _package_split(d: Path, sub: str, lazy: bool = False) -> dict:
         return out
     for k in {0, int(np.argmax(kind == 2))}:                # both normalisations are checked now, not mid-write
         block(k, k + 1)
-    pk = {"mu": mu, "kind": kind, "block": block, "keep": keep, "meta": meta, "mixing": 0.0, "glued_V": ld("glued_V")}
+    pk = {"mu": mu, "kind": kind, "block": block, "keep": keep, "meta": meta, "mixing": 0.0, "glued_V": ld("glued_V"),
+          "glued_F": ld("glued_F") if (d / f"{sub}_glued_F.npy").exists() else None}
     if not lazy:
         pk["potentials"] = block(0, mu.size).T
     return pk
@@ -161,8 +162,12 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
         raise FileExistsError(f"{s.row['name']}: {cx['name']} already holds a Hodge–Dirac package ({have[0][1]['path']}); pass --replace")
     pk = package(d, sub, lazy=True)
     keep, V = pk["keep"], int(cx["n_vertices"])
-    if keep.min() < 0 or keep.max() >= V or np.unique(keep).size != keep.size:
-        raise ValueError(f"{sub}: glued_keep does not index {cx['name']}'s {V} vertices")
+    glued = bool((keep < 0).any())                         # glued BY ANATOMY: a bridge of new vertices, stored as a surface of its own
+    kept = keep[keep >= 0]
+    if kept.max() >= V or np.unique(kept).size != kept.size or (glued and not (keep[:kept.size] >= 0).all()):
+        raise ValueError(f"{sub}: glued_keep does not index {cx['name']}'s {V} vertices (kept first, then the bridge)")
+    if glued and pk.get("glued_F") is None:
+        raise ValueError(f"{sub}: a glued solve without its glued faces (_glued_F.npy)")
     # the same FILES, when both sides say which they are (a FreeSurfer pair: sha256 of lh/rh)
     src = (pk["meta"].get("source") or {})
     mine = json.loads(cx["producer_json"] or "{}")
@@ -172,14 +177,23 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
     # THE SAME SURFACE: the glued vertices are this surface's, at the same positions
     import zarr
     xyz = np.asarray(zarr.open_array(str(s.store / cx["positions_path"]), mode="r")[:], dtype=np.float64)
-    err = float(np.abs(xyz[keep] - pk["glued_V"]).max())
+    err = float(np.abs(xyz[kept] - pk["glued_V"][:kept.size]).max())
     if err > tol_m:
         raise ValueError(f"{sub}: the solved surface is not {cx['name']} (glued vertices off by {err:.3g} m > {tol_m} m)")
-    for t, r in have:
+    gpath = f"sources/{cx['name']}_glued"
+    have += [(t, r) for t, p in (("selection", f"{gpath}_bridge"), ("manifold", gpath)) if (r := s.find(t, p))]
+    aside = None
+    for t, r in have:                                     # a replaced basis's arrays are MOVED ASIDE, never deleted
+        loc = r.get("path") or r.get("array_path")
+        if loc and (s.store / loc).exists():
+            aside = aside or (Path(s.root) / f"_replaced-{now_utc(ms=False)[:10]}" / s.row["path"])
+            (aside / loc).parent.mkdir(parents=True, exist_ok=True)
+            (s.store / loc).rename(aside / loc)
         remove_node(s.db, s.root, t, r["id"])
     K = int(pk["mu"].size)
     m = pk["meta"]
-    prov = {"producer": "nsp rheome-hodge-dirac", "subject": m.get("subject"), "dataset": m.get("dataset"), "job": m.get("job"),
+    prov = {"producer": m.get("producer", "nsp rheome-hodge-dirac"), **({"mesh": m["mesh"]} if m.get("mesh") else {}),
+            "subject": m.get("subject"), "dataset": m.get("dataset"), "job": m.get("job"),
             "rheome_commit": m.get("rheome_commit"), "source": m.get("source"), "glue": {"gap_mm": m.get("glue", {}).get("gap_mm"),
             "nV": len(keep)}, "solve": m.get("solve"), "checks": m.get("checks"),
             "hodge_json_sha256": hashlib.sha256((Path(d) / f"{sub}_hodge.json").read_bytes()).hexdigest(), "mixing_max": pk["mixing"]}
@@ -193,8 +207,23 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
                       "fieldType": "potentials", "kept": "μ > 0", **prov}), created_utc=stamp,
                       populate=lambda at: s.write_array(P_["axis"], pk["mu"].astype(np.float64), table="manifold", id=axis))
     sel = s.selection(name=f"{stem}_support", path=P_["support"], type="indices", manifold_id=cx["id"],
-                      data=keep.astype(np.int32), picked=True,
+                      data=kept.astype(np.int32), picked=True,
                       description=f"{where} the glued Hodge–Dirac surface keeps (the medial cut is outside)")
+    target, rows = cx["id"], V
+    if glued:                                              # THE GLUED SURFACE: the kept vertices (in `support` order) then the bridge's
+        GV, GF = pk["glued_V"], np.asarray(pk["glued_F"], np.int32)
+        csk = s.db.one("SELECT c.name FROM geometry g JOIN coordinate_system c ON c.id = g.coordinate_system_id WHERE g.id = ?", cx["geometry_id"])
+        target = s.manifold(name=f"{cx['name']}_glued", path=gpath, type="surface", n_vertices=len(GV), n_faces=len(GF), derived_from_id=cx["id"],
+                            topology={"kind": "simplicial", "rank": 2, "n_components": 1, "winding": "ccw-outward", "cells": [(2, f"{gpath}/faces")]},
+                            geometry={"form": "stored", "cs_key": csk["name"] if csk else None, "positions_path": f"{gpath}/vertices"},
+                            comment=f"{cx['name']} glued by anatomy: its medial walls cut (the Desikan–Killiany atlas), a bridge grown between the "
+                                        f"rims — vertex i < {kept.size} is {stem}_support[i], the rest the bridge",
+                            producer_json=jdump({"glued_from": cx["name"], "mesh": m.get("mesh"), "glue": m.get("glue")}),
+                            populate=lambda at: (s.write_array(f"{gpath}/vertices", GV.astype(np.float64)), s.write_array(f"{gpath}/faces", GF)))
+        s.selection(name=f"{cx['name']}_glued_bridge", path=f"{gpath}_bridge", type="indices", manifold_id=target,
+                    data=np.arange(kept.size, len(GV), dtype=np.int32), picked=True,
+                    description="the medial BRIDGE (not cortex): to mask it — no sources, a forward zero there")
+        rows = len(GV)
     s.field(name=f"{stem}_kind", path=P_["kind"], kind="form degree", manifold_id=axis, value_type="integer",
             data=pk["kind"], description="per mode: 0 exact (a 0-form potential A) · 2 coexact (a 2-form potential S)")
 
@@ -202,17 +231,20 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
         a = populate_array(at)
         for k0 in range(0, K, MODE_BLOCK):
             blk = pk["block"](k0, min(K, k0 + MODE_BLOCK))
+            if glued:                                      # on the glued surface: every row, in its order
+                a[:, k0:k0 + blk.shape[1]] = blk.astype(np.float32)
+                continue
             E = np.zeros((V, blk.shape[1]), np.float32)
             E[keep] = blk
             a[:, k0:k0 + blk.shape[1]] = E
     op = s.operator(name=f"{stem}_eigenvectors", path=P_["op"], kind="eigenvectors", from_manifold_id=axis,
-                    to_manifold_id=cx["id"], from_value_type="scalar", to_value_type="scalar", layout="dense", n_rows=V, n_cols=K,
-                    meta=array_meta(np.float32, (V, K), chunks=(V, 1), shards=(V, min(K, MODE_BLOCK)), compress=True),
+                    to_manifold_id=target, from_value_type="scalar", to_value_type="scalar", layout="dense", n_rows=rows, n_cols=K,
+                    meta=array_meta(np.float32, (rows, K), chunks=(rows, 1), shards=(rows, min(K, MODE_BLOCK)), compress=False),   # uncompressed: the Editor's ranged reader merges a block into a few requests
                     populate=write, created_utc=stamp,
                     description="Hodge–Dirac modes as vertex potentials: A (exact) or S (coexact) per column; 1-form (∇A + n×∇S)/μ",
                     params_json=jdump({"potentials": "A = ψ/√2 (kind 0) · S = ⟨χ/√2, ω_v⟩ (kind 2)", "support": sel,
                                        "solved": "K x = μ M x, d + δ on the glued intrinsic-Delaunay complex"}),
                     producer_json=jdump(prov))
-    return {"axis": P_["axis"], "surface": cx["name"], "n_modes": K, "n_exact": int((pk["kind"] == 0).sum()),
-            "n_coexact": int((pk["kind"] == 2).sum()), "mu": [float(pk["mu"][0]), float(pk["mu"][-1])], "support": int(keep.size),
+    return {"axis": P_["axis"], "surface": cx["name"], "glued": glued, "rows": rows, "moved_aside": str(aside) if aside else None, "n_modes": K, "n_exact": int((pk["kind"] == 0).sum()),
+            "n_coexact": int((pk["kind"] == 2).sum()), "mu": [float(pk["mu"][0]), float(pk["mu"][-1])], "support": int(kept.size),
             "of": V, "position_err_m": err, "replaced": bool(have), "operator_id": op}

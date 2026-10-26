@@ -15,6 +15,9 @@
     nxr-convert resample --dataset D --subject S --recording NAME --to HZ [--name N]  a stored recording resampled, beside it (``timeseries.py``)
     nxr-convert surface  --dataset D --subject S --fs-dir <FreeSurfer subject dir> --name N [--scs-from tess_*.mat]
                                                                                       add FreeSurfer's lh/rh.pial as one surface
+    nxr-convert modes    --dataset D --subject S --work DIR [--modes K] [--surface NAME] [--replace]   SOLVE the Hodge–Dirac basis from the store
+                         (the Editor's glue by anatomy, intrinsic Delaunay, d + δ; ``eigen/``) and store it on the glued surface;
+                         --export: only the solve's input (to run elsewhere); --input FILE: solve that input (no dataset), store with `hodge`
     nxr-convert hodge    --dataset D --subject S --from <nsp rheome-hodge-dirac dir> [--nsp-subject S] [--replace] [--surface NAME]
                                                                                       add the Hodge–Dirac eigenmodes of the primary
                                                                                       (or of the named surface, suffixed) (``hodge.py``)
@@ -152,6 +155,16 @@ def main(argv: list[str] | None = None) -> int:
     ph.add_argument("--nsp-subject", default=None, help="the file prefix there, when it is not the subject's name")
     ph.add_argument("--replace", action="store_true")
     ph.add_argument("--surface", default=None, help="the surface the solve was on (default: the primary); others get suffixed names")
+    pmo = sub.add_parser("modes", help="SOLVE a subject's Hodge-Dirac basis from its stored surface with the Editor's own methods (glue, "
+                         "intrinsic Delaunay, d + delta) and store it as `hodge` does")
+    pmo.add_argument("--dataset", default=None)
+    pmo.add_argument("--subject", default=None)
+    pmo.add_argument("--modes", type=int, default=3000, help="about this many positive modes, half exact and half coexact (default 3000)")
+    pmo.add_argument("--surface", default=None, help="a surface by name (default: the primary)")
+    pmo.add_argument("--work", required=True, help="where the solve's derivative is written (kept: what was stored, and why)")
+    pmo.add_argument("--replace", action="store_true", help="replace the surface's stored basis (its arrays moved aside, never deleted)")
+    pmo.add_argument("--export", action="store_true", help="only write the solve's INPUT (glue-ready surface + medial wall) to --work, for a solve elsewhere")
+    pmo.add_argument("--input", default=None, help="solve from an exported input (no dataset): the derivative to --work; store it with `hodge --from`")
 
     pn = sub.add_parser("interp", help="write the interpolation operator DST <- SRC (barycentric on the registration spheres)")
     pn.add_argument("--dataset", required=True)
@@ -238,6 +251,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(payload, indent=2))
         return 0
+    if a.cmd == "modes" and a.input:                       # a solve where the store is not (nsp on fir): input file in, derivative out
+        from .eigen.hodge_dirac import load_input, solve_input
+        try:
+            _print({"stage": "result", **solve_input(load_input(Path(a.input)), n_modes=a.modes, work=Path(a.work), progress=_print)})
+            return 0
+        except Exception as e:  # noqa: BLE001
+            _print({"stage": "error", "message": f"{type(e).__name__}: {e}"})
+            return 1
+    if a.cmd == "modes" and not (a.dataset and a.subject):
+        _print({"stage": "error", "message": "modes: --dataset and --subject (or --input)"})
+        return 2
     if a.cmd in ("migrate", "fragment", "merge"):
         from . import shared_dataset as sd
         try:
@@ -358,6 +382,18 @@ def _run(a) -> int:
             with sub.composition():
                 info = add_hodge(sub, a.src, sub=a.nsp_subject, replace=a.replace, surface=a.surface)
             _print({"stage": "result", **info})
+        elif a.cmd == "modes" and a.export:
+            from .eigen.hodge_dirac import modes_input, save_input
+            Path(a.work).mkdir(parents=True, exist_ok=True)
+            out = save_input(modes_input(sub, a.surface), Path(a.work) / f"{sub.row['name']}_{a.surface or 'primary'}_modes_input.npz")
+            _print({"stage": "result", "input": str(out)})
+        elif a.cmd == "modes":
+            from .eigen.hodge_dirac import prepare_hodge
+            from .hodge import add_hodge
+            got = prepare_hodge(sub, n_modes=a.modes, work=Path(a.work), surface=a.surface, progress=_print)
+            with sub.composition():
+                info = add_hodge(sub, a.work, sub=got["prefix"], replace=a.replace, surface=a.surface)
+            _print({"stage": "result", **info, "mesh": got["mesh"], "solve": {k: got[k] for k in ("exact", "coexact", "seconds")}})
         elif a.cmd == "carry-inverse":
             from .convert import carry_inverse
             with sub.composition():

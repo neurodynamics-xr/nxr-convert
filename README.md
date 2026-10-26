@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.14**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). From 0.2.12 new subjects convert in parallel (`fragment --new`) and a map over time (an fMRI BOLD series, its confounds) is converted, not skipped. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.15**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). From 0.2.12 new subjects convert in parallel (`fragment --new`) and a map over time (an fMRI BOLD series, its confounds) is converted, not skipped. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,7 +38,7 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.14 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.15 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
@@ -198,7 +198,24 @@ written before the dataset layout) into the dataset folder as `dataset.sqlite` a
 and the catalog written. The subject stores must already be in the folder; a node missing on disk is reported, not made.
 48 → 49 is the only step it knows.
 
-### The atlas (optional)
+### Hodge–Dirac eigenmodes, solved by nxr (0.2.15)
+
+```bash
+nxr-convert modes --dataset D --subject S --work DIR [--modes 3000] [--surface NAME] [--replace]   # solve from the store, store the basis
+nxr-convert modes --dataset D --subject S --work DIR --export                                       # only the solve's input (one .npz)
+nxr-convert modes --input DIR/<S>_<surface>_modes_input.npz --work OUT [--modes 3000]               # solve it anywhere: no dataset needed
+nxr-convert hodge --dataset D --subject S --from OUT [--surface NAME] [--replace]                   # store a solve made elsewhere
+```
+
+`nxr_convert.eigen` is the Cortical Flow Editor's own method, ported line for line and held equal by parity tests: the two
+hemispheres GLUED BY ANATOMY (each Desikan–Killiany medial wall cut out, a bridge of new vertices grown between the rims), the
+intrinsic Delaunay mesh, and the Hodge–Dirac pencil (d + δ on 0-, 1- and 2-forms), solved as its Laplace–Beltrami and 2-form ladders
+(shift-invert) cut at one λ. It reads only the store (positions in float32, as the Editor receives them), never a source format. The
+basis is stored on the GLUED surface (`<surface>_glued`, a manifold of its own; the bridge a selection on it), which records the
+glued mesh's fingerprint: the Editor uses it only on that mesh. A surface without the atlas is refused. A replaced basis's arrays are
+moved aside, never deleted. Memory: about 8 bytes × (vertices + faces) × 2 × modes — 3 000 modes on fsaverage ico7 need ~25 GB.
+
+
 
 ```bash
 nxr-convert atlas default-subject <datastore>/<dataset> --templates <FreeSurfer subjects dir> […]
