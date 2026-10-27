@@ -312,6 +312,12 @@ def main(argv: list[str] | None = None) -> int:
     prs.add_argument("--recording", required=True, help="the recording's field name")
     prs.add_argument("--to", type=float, required=True, metavar="HZ")
     prs.add_argument("--name", default=None, help="the new recording's name (default: <recording>_<HZ>Hz)")
+    pbs = sub.add_parser("badsegments", help="BAD SEGMENTS detected after the conversion (a JSON per subject) as <rec>_bad_segments, onto each recording "
+                         "and the recordings derived from it (run it after resample)")
+    pbs.add_argument("--dataset", required=True)
+    pbs.add_argument("--subject", required=True)
+    pbs.add_argument("--from", dest="src", required=True, help="{recordings: [{name, segments: [{label, start_s[], stop_s[]}]}]}")
+    pbs.add_argument("--replace", action="store_true")
     pq = sub.add_parser("qc", help="sensor QC of a subject's recordings: the PSD Field, its measures and qc_flag, meg-qc's metrics")
     pq.add_argument("--dataset", required=True)
     pq.add_argument("--subject", required=True)
@@ -547,6 +553,11 @@ def _run(a) -> int:
             from .timeseries import add_resampled
             with sub.composition():
                 info = add_resampled(sub, a.recording, a.to, name=a.name, progress=_print)
+            _print({"stage": "result", **info})
+        elif a.cmd == "badsegments":
+            from .events import import_bad_segments
+            with sub.composition():
+                info = import_bad_segments(sub, json.loads(Path(a.src).read_text()), replace=a.replace)
             _print({"stage": "result", **info})
         elif a.cmd == "qc":
             from .qc import add_qc

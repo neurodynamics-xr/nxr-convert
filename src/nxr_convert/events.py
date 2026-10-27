@@ -216,3 +216,34 @@ def export_events(sub: Subject, rec_path: str, table: EventTable, *, line_id: st
                    description="the recording's bad segments (Brainstorm events labelled bad*), one span per segment; "
                                "code = the event type")
     return {"n_events": n, "n_types": len(table.type_names), "bad_segments": len(bad)}
+
+
+def import_bad_segments(sub: Subject, src: dict, *, replace: bool = False) -> dict:
+    """``nxr-convert badsegments``: BAD SEGMENTS detected after the conversion (Brainstorm's ``process_evt_detect_badsegment``) added to an existing
+    subject, as ``export_events`` writes them — ``<rec>_bad_segments`` spans on the recording's time Line, a code per label. ``src``:
+    ``{"recordings": [{"name": <recording field>, "segments": [{"label": "bad_…", "start_s": [...], "stop_s": [...]}]}]}`` (other keys ignored).
+    The same spans go onto every recording DERIVED from it that exists now (a `resample` copy — its ``resampled_from`` — shares its seconds). A recording with no bad span
+    gets none (absence means none); an existing ``_bad_segments`` is refused unless ``replace``."""
+    from .crud import remove_node
+    from .qc import _factors
+    out = []
+    for r in src["recordings"]:
+        rec = sub.db.one("SELECT * FROM field WHERE subject_id = ? AND kind = 'recording' AND name = ?", sub.id, r["name"])
+        if rec is None:
+            raise KeyError(f"{sub.row['name']}: no recording {r['name']!r}")
+        segs = [s for s in r.get("segments", []) if "bad" in s["label"].lower()]
+        spans = [(float(a), float(b), k) for k, s in enumerate(segs) for a, b in zip(s["start_s"], s["stop_s"]) if b > a]
+        for f in [rec] + sub.db.all("SELECT * FROM field WHERE subject_id = ? AND kind = 'recording' AND (derived_from_id = ? OR "
+                                         "json_extract(producer_json, '$.resampled_from.field') = ?)", sub.id, rec["id"], rec["id"]):
+            path = f"{f['path']}_bad_segments"
+            have = sub.find("selection", path)
+            if have and not replace:
+                raise FileExistsError(f"{sub.row['name']}: {path} exists (--replace)")
+            if have:
+                remove_node(sub.db, sub.root, "selection", have["id"])
+            if spans:
+                time_spans(sub, path, spans, [s["label"] for s in segs], line_id=_factors(sub.db, f["manifold_id"])[1],
+                           of_field_id=f["id"], session=f["session"], description="the recording's bad segments (Brainstorm events labelled bad*, "
+                           "detected after the conversion), one span per segment; code = the event type")
+            out.append({"recording": f["name"], "bad_segments": len(spans), "seconds": round(sum(b - a for a, b, _ in spans), 3)})
+    return {"subject": sub.row["name"], "recordings": out}

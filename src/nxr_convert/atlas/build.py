@@ -226,7 +226,7 @@ def build_subject(dataset_dir: str | Path, subject: str, *, trees: tuple[str, ..
                   maps: bool = True, meg: bool = True, kernels: str = "all", bands: list[tuple[float, float]] | None = None,
                   frame_level: int | None = None, frames_domain: str = "sphere", lc_levels: tuple[int, ...] | None = None,
                   trajectory: tuple[int, int] | None = None, recordings: int | None = None, chunk_frames: int = 4,
-                  replace: bool = False, log=print) -> dict:
+                  replace: bool = False, recordings_like: str | None = None, log=print) -> dict:
     """The subject's atlases, as one composition into its dataset (``<datastore>/<dataset>``). ``chunk_frames``: frames
     projected at a time (memory only — a frame cut by a chunk edge is completed by the next chunk). ``replace``: a previous build's rows
     and arrays are removed first; without it a subject that has an atlas is refused."""
@@ -263,7 +263,7 @@ def build_subject(dataset_dir: str | Path, subject: str, *, trees: tuple[str, ..
         with sub.composition():
             out = _compose(sub, store, T, P, F, area, tpl, default, frames_domain=frames_domain, maps=maps, meg=meg, kernels=kernels,
                            bands=bands, frame_s=frame_s, frame_level=frame_level, lc_levels=lc_levels, trajectory=trajectory, recordings=recordings,
-                           chunk_frames=chunk_frames, log=log)
+                           recordings_like=recordings_like, chunk_frames=chunk_frames, log=log)
         # a replaced estimate leaves the group fields that summed it (another subject's root) behind its row: re-sync them
         stale = verify(ds.db, ds.root)
         if stale:
@@ -274,7 +274,7 @@ def build_subject(dataset_dir: str | Path, subject: str, *, trees: tuple[str, ..
 
 
 def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, meg, kernels, bands, frame_s, frame_level, lc_levels, trajectory,
-             recordings, chunk_frames, log) -> dict:
+             recordings, chunk_frames, log, recordings_like=None) -> dict:
     t1 = time.time()
     fr, runs, fmeta = make_frames(store, frames_domain)
     side = _subject_side(sub, store, fr, fmeta, tpl, default, frames_domain)
@@ -326,6 +326,7 @@ def _compose(sub, store, T, P, F, area, tpl, default, *, frames_domain, maps, me
         ks = [k for k in ks if k.name in chosen]
         sessions = {k.session for k in ks}
         recs = [r for r in store.recordings() if r.session in sessions]
+        recs = [r for r in recs if recordings_like in r.name] if recordings_like else recs     # e.g. '_300Hz': the resampled copies only
         recs = recs[:recordings] if recordings else recs
         bands_id = _bands_partition(sub, bands) if recs else None
         for rec in recs:

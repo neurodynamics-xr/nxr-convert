@@ -48,6 +48,7 @@ def add_parser(sub) -> None:
     b.add_argument("--lc-levels", default=None, help="levels with explicit Levi-Civita reductions (default: the dataset's)")
     b.add_argument("--trajectory", default=None, help="SPACE,TIME levels of the peak trajectories (default: the dataset's)")
     b.add_argument("--recordings", type=int, default=None, help="only the first N recordings (testing)")
+    b.add_argument("--recordings-like", default=None, help="only the recordings whose name contains this (e.g. _300Hz: the resampled copies)")
     b.add_argument("--chunk-frames", type=int, default=4, help="frames projected at a time (memory only)")
     b.add_argument("--no-maps", action="store_true")
     b.add_argument("--no-meg", action="store_true")
@@ -79,7 +80,7 @@ def run(a) -> int:
                               maps=not a.no_maps, meg=not a.no_meg, kernels=a.kernels, frames_domain=a.frames_domain,
                               lc_levels=tuple(int(x) for x in a.lc_levels.split(",") if x.strip()) if a.lc_levels is not None else None,
                               trajectory=tuple(int(x) for x in a.trajectory.split(",")) if a.trajectory else None,
-                              recordings=a.recordings, chunk_frames=a.chunk_frames, log=log)
+                              recordings=a.recordings, recordings_like=a.recordings_like, chunk_frames=a.chunk_frames, log=log)
         elif a.atlas_cmd == "reduce":
             from .reduce import reduce_dataset
             r = reduce_dataset(a.dataset, sources=tuple(a.sources), kernels=a.kernels, log=log)
