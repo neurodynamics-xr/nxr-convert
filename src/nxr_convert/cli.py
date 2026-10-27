@@ -18,6 +18,12 @@
     nxr-convert modes    --dataset D --subject S --work DIR [--modes K] [--surface NAME] [--replace]   SOLVE the Hodge–Dirac basis from the store
                          (the Editor's glue by anatomy, intrinsic Delaunay, d + δ; ``eigen/``) and store it on the glued surface;
                          --export: only the solve's input (to run elsewhere); --input FILE: solve that input (no dataset), store with `hodge`
+    nxr-convert transfermatrix --dataset D --subject S --subject-solve DIR --template-solve DIR --modes K --out DIR [--template T] [--check]
+                         REGISTER a subject to its template: T carries its Hodge–Dirac coefficients onto the template's (``eigen/register.py``)
+    nxr-convert registerkernel --dataset D --subject S --kernel NAME --subject-solve DIR --template-solve DIR --modes K --out DIR
+    nxr-convert rotationplane --dataset D --subject S --kernel K --recording R [--band 8 12]   the kernel's top rotation plane, as two sensor filters
+    nxr-convert carry --dataset D --subject S (--field NAME | --selection NAME)   a native map or points carried to the template
+                         a kernel REGISTERED onto the template (fuse, transfer, synthesise) and stored on the subject (``eigen/registered.py``)
     nxr-convert hodge    --dataset D --subject S --from <nsp rheome-hodge-dirac dir> [--nsp-subject S] [--replace] [--surface NAME]
                                                                                       add the Hodge–Dirac eigenmodes of the primary
                                                                                       (or of the named surface, suffixed) (``hodge.py``)
@@ -59,6 +65,51 @@ def version_string() -> str:
 def _dataset(path: str):
     from .crud import open_dataset
     return open_dataset(path)
+
+
+def _transfer(a) -> int:
+    """`nxr-convert transfermatrix`: the two surfaces and spheres from the store, the two solves from their folders; T written for the Editor"""
+    import zarr
+    import numpy as np
+    from .crud import Subject, open_dataset
+    from .eigen.register import Registration, check_transfer, load_solve, transfer_matrix, write_transfer
+    def surface(sub, name):
+        cx = sub.db.one("SELECT m.*, g.positions_path FROM manifold m JOIN geometry g ON g.id = m.geometry_id WHERE m.subject_id = ? AND "
+                        + ("m.is_primary = 1" if name is None else "m.type = 'surface' AND m.name = ?"), sub.id, *([] if name is None else [name]))
+        if cx is None:
+            raise KeyError(f"{sub.row['name']}: no surface {name or '(primary)'}")
+        rd = lambda p: np.asarray(zarr.open_array(str(sub.at(p)), mode="r")[...])
+        F = rd(sub.db.one("SELECT path FROM topology_cell WHERE topology_id = ? AND rank = 2", cx["topology_id"])["path"]).astype(np.int64)
+        sph = sub.db.one("SELECT m.*, g.positions_path FROM manifold m JOIN geometry g ON g.id = m.geometry_id WHERE m.subject_id = ? AND m.name = ?",
+                         sub.id, f"{cx['name']}_sphere")
+        if sph is None:
+            raise KeyError(f"{sub.row['name']}: {cx['name']} has no registered sphere ({cx['name']}_sphere)")
+        return cx["name"], rd(cx["positions_path"]).astype(np.float32).astype(np.float64), F, rd(sph["positions_path"]).astype(np.float64)
+    with open_dataset(Path(a.dataset), lock=False) as ds:
+        s = Subject.open(ds, a.subject)
+        tname = a.template or (ds.db.one("SELECT name FROM subject WHERE id = ?", s.row["template_id"]) or {}).get("name")
+        if not tname:                                     # no template on the subject's row: the dataset's one template subject
+            tpl = ds.db.all("SELECT name FROM subject WHERE dataset_id = ? AND kind = 'template'", ds.id)
+            if len(tpl) != 1:
+                raise KeyError(f"{a.subject}: no template subject on its row and {len(tpl)} in the dataset (name one with --template)")
+            tname = tpl[0]["name"]
+        t = Subject.open(ds, tname)
+        _, Ps, Fs, Ss = surface(s, a.subject_surface)
+        tsurf, Pt, Ft, St = surface(t, a.template_surface)
+    sub_solve = load_solve(Path(a.subject_solve), a.subject_prefix or a.subject, a.modes)
+    tpl_solve = load_solve(Path(a.template_solve), a.template_prefix or tname, a.modes)
+    reg = Registration(Ps, Fs, Ss, Pt, Ft, St, subject_left=a.subject_left, template_left=a.template_left, sampling=a.sampling)
+    T, R = transfer_matrix(sub_solve, tpl_solve, reg)
+    out = write_transfer(Path(a.out), T, sub_solve, tpl_solve, subject_name=a.subject, template_name=tname, template_surface=tsurf)
+    res = {"stage": "result", "transfer": str(out), "K": a.modes, "sampling": a.sampling, "R": list(R.shape), "unregistered_rows": int((R.getnnz(1) == 0).sum()),
+           "from": sub_solve.sha, "to": tpl_solve.sha}
+    if a.check:
+        rows = check_transfer(T, R, sub_solve, tpl_solve, reg)
+        res["check"] = rows
+        res["gate"] = all(r["gate"] for r in rows)
+        res["target"] = all(r["target"] for r in rows)
+    _print(res)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,6 +217,67 @@ def main(argv: list[str] | None = None) -> int:
     pmo.add_argument("--export", action="store_true", help="only write the solve's INPUT (glue-ready surface + medial wall) to --work, for a solve elsewhere")
     pmo.add_argument("--input", default=None, help="solve from an exported input (no dataset): the derivative to --work; store it with `hodge --from`")
 
+    ptr = sub.add_parser("transfermatrix", help="REGISTER a subject to its template by the TRANSFER MATRIX of their Hodge-Dirac modes (nxr_convert.eigen.register)")
+    ptr.add_argument("--dataset", required=True)
+    ptr.add_argument("--subject", required=True)
+    ptr.add_argument("--template", default=None, help="the template subject (default: the subject's own template, the dataset's default subject)")
+    ptr.add_argument("--subject-solve", required=True, help="the subject's `modes` solve folder")
+    ptr.add_argument("--template-solve", required=True, help="the template's `modes` solve folder")
+    ptr.add_argument("--subject-prefix", default=None, help="file prefix in the subject's solve (default: the subject's name)")
+    ptr.add_argument("--template-prefix", default=None, help="file prefix in the template's solve (default: the template's name)")
+    ptr.add_argument("--subject-surface", default=None, help="the subject's surface (default: its primary); its sphere is <surface>_sphere")
+    ptr.add_argument("--template-surface", default=None, help="the template's surface (default: its primary)")
+    ptr.add_argument("--subject-left", default="+y", help="the axis the subject's left hemisphere lies on (+y: Brainstorm SCS)")
+    ptr.add_argument("--template-left", default="-x", help="the axis the template's left hemisphere lies on (-x: MNI, fsaverage)")
+    ptr.add_argument("--sampling", default="barycentric", choices=("barycentric", "nearest"),
+                     help="on the registered spheres: barycentric (default) or nearest (FreeSurfer's mri_surf2surf default)")
+    ptr.add_argument("--modes", type=int, required=True, help="K: the first K modes of each solve (the Editor loads exactly these)")
+    ptr.add_argument("--out", required=True, help="where hodge-to-<template>.f32/.json go")
+    ptr.add_argument("--check", action="store_true", help="also the spherical-harmonic self-check (gate err_reg <= 0.05)")
+
+    pca = sub.add_parser("carry", help="CARRY a subject's measurement to its template: a scalar map (sampled through the registered spheres) or points "
+                         "(each to the nearest template vertex), measured on the subject's own cortex; stored on the template (nxr_convert.eigen.carry)")
+    pca.add_argument("--dataset", required=True)
+    pca.add_argument("--subject", required=True)
+    what = pca.add_mutually_exclusive_group(required=True)
+    what.add_argument("--field", help="a scalar map on the subject's surface, by name")
+    what.add_argument("--selection", help="a point selection (vertex indices) on the subject's surface, by name")
+    pca.add_argument("--template", default=None, help="the template subject (default: the subject's template, else the dataset's one)")
+    pca.add_argument("--subject-surface", default=None)
+    pca.add_argument("--template-surface", default=None)
+    pca.add_argument("--subject-left", default="+y")
+    pca.add_argument("--template-left", default="-x")
+    pca.add_argument("--sampling", default="barycentric", choices=("barycentric", "nearest"))
+    pca.add_argument("--replace", action="store_true")
+    prp = sub.add_parser("rotationplane", help="a kernel's top rotation plane in a band, as two SENSOR filters (the Editor's Virtual sensors read it); "
+                         "stored on the subject as <kernel>_rotationPlane (nxr_convert.eigen.plane)")
+    prp.add_argument("--dataset", required=True)
+    prp.add_argument("--subject", required=True)
+    prp.add_argument("--kernel", required=True)
+    prp.add_argument("--recording", required=True, help="the recording's name")
+    prp.add_argument("--band", type=float, nargs=2, default=(8.0, 12.0))
+    prp.add_argument("--replace", action="store_true")
+    prk = sub.add_parser("registerkernel", help="REGISTER a subject's inverse kernel onto its template: fused into the Hodge-Dirac modes, carried by "
+                         "the transfer matrix, synthesised on the template; stored on the subject (nxr_convert.eigen.registered)")
+    prk.add_argument("--dataset", required=True)
+    prk.add_argument("--subject", required=True)
+    prk.add_argument("--kernel", required=True, help="the subject's inverse kernel, by name")
+    prk.add_argument("--template", default=None, help="the template subject (default: the subject's template, else the dataset's one)")
+    prk.add_argument("--subject-solve", required=True, help="the subject's solve folder, or `store`: its stored basis (the mass rebuilt from the glued mesh; no solve)")
+    prk.add_argument("--template-solve", required=True)
+    prk.add_argument("--subject-prefix", default=None)
+    prk.add_argument("--template-prefix", default=None)
+    prk.add_argument("--subject-surface", default=None)
+    prk.add_argument("--template-surface", default=None)
+    prk.add_argument("--subject-left", default="+y")
+    prk.add_argument("--template-left", default="-x")
+    prk.add_argument("--sampling", default="barycentric", choices=("barycentric", "nearest"))
+    prk.add_argument("--flow", default="fields", choices=("fields", "potentials"),
+                     help="carry the flow modes as unit flow fields (default: the template's size does not steepen them) or as potentials")
+    prk.add_argument("--modes", type=int, required=True)
+    prk.add_argument("--out", required=True, help="where the transfer files are written")
+    prk.add_argument("--replace", action="store_true")
+
     pn = sub.add_parser("interp", help="write the interpolation operator DST <- SRC (barycentric on the registration spheres)")
     pn.add_argument("--dataset", required=True)
     pn.add_argument("--subject", required=True)
@@ -256,6 +368,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _print({"stage": "result", **solve_input(load_input(Path(a.input)), n_modes=a.modes, work=Path(a.work), progress=_print)})
             return 0
+        except Exception as e:  # noqa: BLE001
+            _print({"stage": "error", "message": f"{type(e).__name__}: {e}"})
+            return 1
+    if a.cmd == "transfermatrix":
+        try:
+            return _transfer(a)
         except Exception as e:  # noqa: BLE001
             _print({"stage": "error", "message": f"{type(e).__name__}: {e}"})
             return 1
@@ -382,6 +500,27 @@ def _run(a) -> int:
             with sub.composition():
                 info = add_hodge(sub, a.src, sub=a.nsp_subject, replace=a.replace, surface=a.surface)
             _print({"stage": "result", **info})
+        elif a.cmd in ("registerkernel", "carry"):
+            from .eigen.registered import register_kernel
+            from .eigen.carry import carry
+            tname = a.template or (ds.db.one("SELECT name FROM subject WHERE id = ?", sub.row["template_id"]) or {}).get("name")
+            if not tname:
+                tpl_rows = ds.db.all("SELECT name FROM subject WHERE dataset_id = ? AND kind = 'template'", ds.id)
+                if len(tpl_rows) != 1:
+                    raise KeyError(f"{a.subject}: no template on its row and {len(tpl_rows)} in the dataset (--template)")
+                tname = tpl_rows[0]["name"]
+            tpl = Subject.open(ds, tname, created_by=stamp())
+            if a.cmd == "carry":
+                with tpl.composition():
+                    info = carry(sub, tpl, field=a.field, selection=a.selection, subject_surface=a.subject_surface, template_surface=a.template_surface,
+                                 subject_left=a.subject_left, template_left=a.template_left, sampling=a.sampling, replace=a.replace)
+            else:
+                with sub.composition():
+                    info = register_kernel(sub, tpl, kernel=a.kernel, subject_solve=Path(a.subject_solve), template_solve=Path(a.template_solve), modes=a.modes,
+                                           out=Path(a.out), subject_prefix=a.subject_prefix, template_prefix=a.template_prefix, subject_surface=a.subject_surface,
+                                           template_surface=a.template_surface, subject_left=a.subject_left, template_left=a.template_left,
+                                           sampling=a.sampling, flow=a.flow, replace=a.replace, progress=_print)
+            _print({"stage": "result", **info})
         elif a.cmd == "modes" and a.export:
             from .eigen.hodge_dirac import modes_input, save_input
             Path(a.work).mkdir(parents=True, exist_ok=True)
@@ -394,6 +533,11 @@ def _run(a) -> int:
             with sub.composition():
                 info = add_hodge(sub, a.work, sub=got["prefix"], replace=a.replace, surface=a.surface)
             _print({"stage": "result", **info, "mesh": got["mesh"], "solve": {k: got[k] for k in ("exact", "coexact", "seconds")}})
+        elif a.cmd == "rotationplane":
+            from .eigen.plane import store_rotation_plane
+            with sub.composition():
+                info = store_rotation_plane(sub, kernel=a.kernel, recording=a.recording, band=a.band, replace=a.replace)
+            _print({"stage": "result", **info})
         elif a.cmd == "carry-inverse":
             from .convert import carry_inverse
             with sub.composition():
