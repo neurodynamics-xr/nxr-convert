@@ -30,6 +30,8 @@ that atlas's REGIONS manifold, the one the fibres' connectomes sit on (D47/D126)
 """
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,25 @@ def _text(v: Any) -> str:
     return str(v).strip()
 
 
+def _provenance(mat: dict, extra: dict | None) -> dict[str, Any]:
+    """What made a map, for its ``producer_json``: the file's ``Provenance`` (JSON text, written by the pipeline that made the map),
+    overlaid by ``extra`` (``map --provenance FILE``), and Brainstorm's own ``History`` rows ("date | type | text")."""
+    out: dict[str, Any] = {}
+    txt = _text(mat.get("Provenance"))
+    if txt:
+        try:
+            out["provenance"] = json.loads(txt)
+        except json.JSONDecodeError:
+            out["provenance"] = {"text": txt}
+    if extra:
+        out["provenance"] = {**out.get("provenance", {}), **extra}
+    h = mat.get("History")
+    if h is not None and np.size(h):
+        rows = np.atleast_2d(np.asarray(h, dtype=object))
+        out["history"] = [" | ".join(_text(c) for c in r) for r in rows]
+    return out
+
+
 def is_source_map(mat: dict) -> bool:
     """A results file that holds VALUES on its surface: a non-empty ``ImageGridAmp`` and no
     ``ImagingKernel``. Recognised by content, not by ``DataType`` — Brainstorm writes that
@@ -70,7 +91,8 @@ def find_source_maps(cond_dir: str | Path) -> list[Path]:
             if "KERNEL" not in p.name and not p.name.startswith("._")]
 
 
-def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str | Path, session: str | None) -> dict[str, Any]:
+def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str | Path, session: str | None, replace: bool = False,
+                      provenance: dict | None = None) -> dict[str, Any]:
     p = Path(results_file)
     m = load_mat(p)          # ponytail: a time-resolved map is loaded whole (15k vertices × 150 TRs = 18 MB); stream it if maps grow to 10⁵ × 10³
     if not is_source_map(m):
@@ -89,11 +111,16 @@ def export_source_map(sub: Subject, results_file: str | Path, *, bst_root: str |
     comment = _text(m.get("Comment")) or p.stem
     stem = sanitize_node_name(p.stem.removeprefix("results_"))
     node = f"sources/{stem}"
-    if sub.find("field", node):
-        raise ValueError(f"{p.name}: the subject already holds {node}")
+    have = sub.find("field", node)
+    if have and not replace:
+        raise ValueError(f"{p.name}: the subject already holds {node} (--replace)")
+    if have:
+        from .crud import remove_node
+        remove_node(sub.db, sub.root, "field", have["id"])
     text = f"{stem} {comment}".lower()
     unit = "SUVR" if "suvr" in text else None
-    producer = {"surface": surface_rel, **({"display_units": _text(m.get("DisplayUnits"))} if _text(m.get("DisplayUnits")) else {})}
+    producer = {"surface": surface_rel, **({"display_units": _text(m.get("DisplayUnits"))} if _text(m.get("DisplayUnits")) else {}),
+                **_provenance(m, provenance)}
     if timed:                                                        # a BOLD series: on the surface × its own time Line, stored as a recording is
         if amp.shape[1] != t.size:
             raise ValueError(f"{p.name}: {amp.shape[1]} columns for {t.size} time points")
@@ -254,12 +281,15 @@ def export_region_map(sub: Subject, matrix_file: str | Path, *, bst_root: str | 
     return {"name": stem, "id": fid, "surface": spath.rsplit("/", 1)[-1], "atlas": fam, "regions": len(labels), "kind": comment}
 
 
-def export_map(sub: Subject, path: str | Path, *, bst_root: str | Path, session: str | None) -> dict[str, Any]:
-    """A map file of any kind: ``matrix_*`` a matrix over time or a region map, else a source map (static or over time)."""
+def export_map(sub: Subject, path: str | Path, *, bst_root: str | Path, session: str | None, replace: bool = False,
+               provenance: dict | None = None) -> dict[str, Any]:
+    """A map file of any kind: ``matrix_*`` a matrix over time or a region map, else a source map (static or over time). ``replace`` and
+    ``provenance`` apply to source maps (a surface map's record of what made it: method, reference, versions)."""
     if Path(path).name.startswith("matrix_") and is_matrix_series(path):
         return export_matrix_series(sub, path, session=session)
-    f = export_region_map if Path(path).name.startswith("matrix_") else export_source_map
-    return f(sub, path, bst_root=bst_root, session=session)
+    if Path(path).name.startswith("matrix_"):
+        return export_region_map(sub, path, bst_root=bst_root, session=session)
+    return export_source_map(sub, path, bst_root=bst_root, session=session, replace=replace, provenance=provenance)
 
 
 def template_map_files(root: str | Path) -> list[Path]:

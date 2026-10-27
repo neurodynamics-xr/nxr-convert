@@ -12,6 +12,7 @@
     nxr-convert mri      --dataset D --subject S --anat <anat dir> [--only N …]      add MRI volumes
     nxr-convert inverse  --dataset D --subject S --file results_*KERNEL*.mat --session C --bst-root P [--channels-id …]
     nxr-convert carry-inverse --dataset D --subject S --from <dataset> --kernel NAME --session C   an inverse kernel from another store of the subject
+    nxr-convert carry-hodge --dataset D --subject S --from <dataset> [--replace]   the primary cortex's Hodge-Dirac basis from another store of the subject
     nxr-convert resample --dataset D --subject S --recording NAME --to HZ [--name N]  a stored recording resampled, beside it (``timeseries.py``)
     nxr-convert surface  --dataset D --subject S --fs-dir <FreeSurfer subject dir> --name N [--scs-from tess_*.mat]
                                                                                       add FreeSurfer's lh/rh.pial as one surface
@@ -292,6 +293,9 @@ def main(argv: list[str] | None = None) -> int:
     pmap.add_argument("--file", required=True, nargs="+")
     pmap.add_argument("--bst-root", required=True)
     pmap.add_argument("--session", default=None)
+    pmap.add_argument("--replace", action="store_true", help="a source map of the same name is replaced (its record too)")
+    pmap.add_argument("--provenance", default=None, help="a JSON file: what made the map(s), stored in each map's producer_json "
+                      "(over the file's own Provenance field)")
 
     pr = sub.add_parser("remove", help="delete a subject, or one node of it (by its store-relative path)")
     pr.add_argument("--dataset", required=True)
@@ -306,6 +310,13 @@ def main(argv: list[str] | None = None) -> int:
     pci.add_argument("--kernel", required=True, help="the kernel's name there")
     pci.add_argument("--session", required=True, help="this subject's session it maps (its channels, its head model)")
     pci.add_argument("--name", default=None)
+    pch = sub.add_parser("carry-hodge", help="the primary cortex's Hodge-Dirac basis CARRIED from another dataset holding the same subject on the "
+                         "same cortex (its stored modes, μ, support, glued surface), stored as `hodge --from` stores a solve")
+    pch.add_argument("--dataset", required=True)
+    pch.add_argument("--subject", required=True)
+    pch.add_argument("--from", dest="src", required=True, help="the other dataset folder (<datastore>/<dataset>)")
+    pch.add_argument("--from-subject", default=None, help="the subject's name there (default: the same)")
+    pch.add_argument("--replace", action="store_true", help="replace a basis already stored (moved aside, never deleted)")
     prs = sub.add_parser("resample", help="a STORED recording resampled to HZ (resample_poly) as a recording beside it — no protocol read")
     prs.add_argument("--dataset", required=True)
     prs.add_argument("--subject", required=True)
@@ -549,6 +560,11 @@ def _run(a) -> int:
             with sub.composition():
                 info = carry_inverse(sub, src=a.src, kernel=a.kernel, session=a.session, src_subject=a.from_subject, name=a.name, progress=_print)
             _print({"stage": "result", **info})
+        elif a.cmd == "carry-hodge":
+            from .hodge import carry_hodge
+            with sub.composition():
+                info = carry_hodge(sub, a.src, src_subject=a.from_subject, replace=a.replace)
+            _print({"stage": "result", **info})
         elif a.cmd == "resample":
             from .timeseries import add_resampled
             with sub.composition():
@@ -571,12 +587,13 @@ def _run(a) -> int:
             _print({"stage": "result", **info})
         elif a.cmd == "map":
             from .results_map import export_map
+            prov = json.loads(Path(a.provenance).read_text()) if a.provenance else None
             with sub.composition():
                 wrote = []
                 for f in a.file:
                     if not Path(f).is_file():
                         raise FileNotFoundError(f"not a file: {f}")
-                    info = export_map(sub, f, bst_root=a.bst_root, session=a.session)
+                    info = export_map(sub, f, bst_root=a.bst_root, session=a.session, replace=a.replace, provenance=prov)
                     wrote.append(info["name"])
                     _print({"stage": "map", **{k: v for k, v in info.items() if k != "id"}})
             _print({"stage": "result", "maps": wrote})

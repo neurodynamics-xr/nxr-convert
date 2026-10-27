@@ -154,13 +154,28 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
         if cx is None:
             have_names = [r["name"] for r in s.db.all("SELECT name FROM manifold WHERE subject_id = ? AND type = 'surface' ORDER BY name", s.id)]
             raise KeyError(f"{s.row['name']}: no surface named {surface!r}; it has {', '.join(have_names) or 'none'}")
+    _refuse_existing(s, cx, replace)
+    pk = package(d, sub, lazy=True)
+    pk["hodge_json_sha256"] = hashlib.sha256((Path(d) / f"{sub}_hodge.json").read_bytes()).hexdigest()
+    return _store_package(s, cx, pk, sub=sub, replace=replace, tol_m=tol_m)
+
+
+def _refuse_existing(s: Subject, cx: dict, replace: bool) -> None:
+    stem = "hodgeDirac" if cx["is_primary"] else f"hodgeDirac__{cx['name']}"
+    P_ = _paths(stem)
+    have = [r for t, p in (("operator", P_["op"]), ("field", P_["kind"]), ("selection", P_["support"]), ("manifold", P_["axis"]))
+            if (r := s.find(t, p))]
+    if have and not replace:
+        raise FileExistsError(f"{s.row['name']}: {cx['name']} already holds a Hodge–Dirac package ({have[0]['path']}); pass --replace")
+
+
+def _store_package(s: Subject, cx: dict, pk: dict, *, sub: str, replace: bool, tol_m: float) -> dict:
+    """the package ``pk`` (``package`` read from a solve folder, or ``carry_hodge`` from another dataset's stored basis) stored on ``cx``:
+    the axis of μ, the support, the glued surface and its bridge, the kinds, the eigenvectors; a replaced basis moved aside"""
     stem = "hodgeDirac" if cx["is_primary"] else f"hodgeDirac__{cx['name']}"
     P_ = _paths(stem)
     have = [(t, r) for t, p in (("operator", P_["op"]), ("field", P_["kind"]), ("selection", P_["support"]), ("manifold", P_["axis"]))
             if (r := s.find(t, p))]
-    if have and not replace:
-        raise FileExistsError(f"{s.row['name']}: {cx['name']} already holds a Hodge–Dirac package ({have[0][1]['path']}); pass --replace")
-    pk = package(d, sub, lazy=True)
     keep, V = pk["keep"], int(cx["n_vertices"])
     glued = bool((keep < 0).any())                         # glued BY ANATOMY: a bridge of new vertices, stored as a surface of its own
     kept = keep[keep >= 0]
@@ -196,7 +211,8 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
             "subject": m.get("subject"), "dataset": m.get("dataset"), "job": m.get("job"),
             "rheome_commit": m.get("rheome_commit"), "source": m.get("source"), "glue": {"gap_mm": m.get("glue", {}).get("gap_mm"),
             "nV": len(keep)}, "solve": m.get("solve"), "checks": m.get("checks"),
-            "hodge_json_sha256": hashlib.sha256((Path(d) / f"{sub}_hodge.json").read_bytes()).hexdigest(), "mixing_max": pk["mixing"]}
+            **({"hodge_json_sha256": pk["hodge_json_sha256"]} if pk.get("hodge_json_sha256") else {}), "mixing_max": pk["mixing"],
+            **({"carried_from": m["carried_from"]} if m.get("carried_from") else {})}
     stamp = now_utc(ms=False)
     axis = uuid7()
     cs = f"eigenvalue:{stem}"
@@ -248,3 +264,47 @@ def add_hodge(s: Subject, d: str | Path, *, sub: str | None = None, replace: boo
     return {"axis": P_["axis"], "surface": cx["name"], "glued": glued, "rows": rows, "moved_aside": str(aside) if aside else None, "n_modes": K, "n_exact": int((pk["kind"] == 0).sum()),
             "n_coexact": int((pk["kind"] == 2).sum()), "mu": [float(pk["mu"][0]), float(pk["mu"][-1])], "support": int(kept.size),
             "of": V, "position_err_m": err, "replaced": bool(have), "operator_id": op}
+
+
+def carry_hodge(s: Subject, src: str | Path, *, src_subject: str | None = None, replace: bool = False, tol_m: float = 1e-6) -> dict:
+    """The PRIMARY cortex's Hodge–Dirac basis CARRIED from another dataset that holds the same subject on the same cortex (its stored μ, kinds,
+    vertex potentials, support and glued surface), stored as ``hodge --from`` stores a solve (``_store_package``): the cortex is checked the same
+    (the kept glued vertices within ``tol_m``), the source's provenance kept with where it was carried from, a replaced basis moved aside.
+    Nothing of the source is written."""
+    import zarr
+    from .crud import open_dataset
+    src = Path(src)
+    cx = s.db.one("SELECT m.*, g.positions_path FROM manifold m LEFT JOIN geometry g ON g.id = m.geometry_id "
+                  "WHERE m.subject_id = ? AND m.is_primary = 1", s.id)
+    if cx is None:
+        raise KeyError(f"{s.row['name']}: no primary surface")
+    _refuse_existing(s, cx, replace)
+    with open_dataset(src, lock=False) as sds:
+        so = sds.db.one("SELECT * FROM subject WHERE name = ?", src_subject or s.row["name"])
+        if so is None:
+            raise KeyError(f"{src}: no subject {src_subject or s.row['name']}")
+        root = src / so["path"]
+        scx = sds.db.one("SELECT * FROM manifold WHERE subject_id = ? AND is_primary = 1", so["id"])
+        op = sds.db.one("SELECT * FROM operator WHERE subject_id = ? AND name = 'hodgeDirac_eigenvectors'", so["id"])
+        if scx is None or op is None:
+            raise KeyError(f"{src}/{so['name']}: no stored Hodge–Dirac basis on its primary cortex")
+        if scx["name"] != cx["name"]:
+            raise ValueError(f"{s.row['name']}: the source's primary cortex is {scx['name']}, this one's {cx['name']}")
+        rd = lambda p: np.asarray(zarr.open_array(str(root / p), mode="r")[...])
+        mu, kind = rd("eigen/hodgeDirac").astype(np.float64), rd("eigen/hodgeDirac_kind").astype(np.uint8)
+        kept = rd("hodgeDirac_support").astype(np.int64)
+        g = f"sources/{scx['name']}_glued"
+        glued = (root / g).exists()
+        GV = rd(f"{g}/vertices").astype(np.float64) if glued else None
+        GF = rd(f"{g}/faces").astype(np.int64) if glued else None
+        keep = np.r_[kept, np.full(len(GV) - kept.size, -1, np.int64)] if glued else kept
+        if not glued:                                       # an unglued basis: the vertices the kept indices name
+            GV = rd(sds.db.read("geometry", scx["geometry_id"])["positions_path"]).astype(np.float64)[kept]
+        E = zarr.open_array(str(root / op["path"]), mode="r")
+        rows = E.shape[0]
+        block = (lambda k0, k1: np.asarray(E[:, k0:k1])) if glued else (lambda k0, k1: np.asarray(E[kept, k0:k1]))
+        prov = json.loads(op["producer_json"] or "{}")
+        prov["carried_from"] = {"dataset": str(src), "subject": so["name"], "operator": op["id"], "rows": int(rows)}
+        pk = {"mu": mu, "kind": kind, "block": block, "keep": keep, "meta": prov, "mixing": float(prov.get("mixing_max") or 0.0),
+              "glued_V": GV, "glued_F": GF}
+        return _store_package(s, cx, pk, sub=s.row["name"], replace=replace, tol_m=tol_m)
