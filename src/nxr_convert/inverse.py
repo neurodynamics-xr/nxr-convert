@@ -102,7 +102,9 @@ def export_inverse(sub: Subject, kernel: dict, *, session: str, name: str, chann
                    forward_id: str | None = None, kernel_file: str = "", bst_root: str = "",
                    channel_names: list[str] | None = None, n_vertices: int | None = None,
                    grid_loc: np.ndarray | None = None, grid_orient: np.ndarray | None = None,
-                   source_sha1: str | None = None) -> dict:
+                   source_sha1: str | None = None, producer_extra: dict[str, Any] | None = None) -> dict:
+    """``kernel`` is Brainstorm's results struct (or one shaped like it); ``producer_extra`` is merged into its producer last
+    (another reader's method, units and provenance)."""
     k = np.asarray(kernel["ImagingKernel"])
     if k.size == 0:
         raise ValueError("not an inverse KERNEL results file (need .ImagingKernel)")
@@ -149,7 +151,8 @@ def export_inverse(sub: Subject, kernel: dict, *, session: str, name: str, chann
     _set_if(producer, "bst_history", _history(kernel.get("History")))
     if source_sha1:
         producer["source_sha1"] = source_sha1
-    producer = _jsonable(producer)
+    producer = _jsonable({**producer, **(producer_extra or {})})
+    method, units = producer["method"], producer["units"]
     stamp = now_utc(ms=False)
 
     sel_id = sub.selection(name=f"{name}_channels", path=f"{name}_channels", type="indices", manifold_id=channels_id,

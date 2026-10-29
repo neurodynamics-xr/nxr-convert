@@ -1,6 +1,6 @@
 [project]
 name = "nxr-convert"
-version = "0.2.18"
+version = "0.2.19"
 description = "Convert Brainstorm MEG/EEG protocols into nxr datastores (SQLite rows + Zarr v3 arrays) for the Cortical Flow desktop app."
 readme = "README.md"
 license = "MIT"
@@ -48,4 +48,10 @@ nxr-convert = "nxr_convert.cli:main"
 [project.optional-dependencies]
 atlas = [
     "nibabel>=5.4.2",
+]
+ieeg = [
+    "nibabel>=5.4.2",
+]
+mne = [
+    "mne>=1.13",
 ]

@@ -33,6 +33,16 @@
                                                                                       the templates-and-references dataset (``templates.py``)
     nxr-convert map      --dataset D --subject S --file results_*.mat|matrix_*.mat … --bst-root P [--session C]
                                                                                       add static maps (surface or region)
+    nxr-convert qc       --dataset D --subject S [--megqc <sub>.tar.gz] [--replace]  sensor QC of the recordings (``qc.py``)
+    nxr-convert migrate  --from nxr.sqlite --dataset D                              a schema-48 shared database into a dataset at this schema
+    nxr-convert fragment --dataset D (--subject S | --new) --to DIR                  one subject's writable copy, for a parallel job
+    nxr-convert merge    --dataset D FRAGMENT … [--replace]                          fold fragments back, serially (``shared_dataset.py``)
+    nxr-convert badsegments --dataset D --subject S --from JSON [--replace]       bad segments detected after the conversion (``events.py``)
+    nxr-convert mne-eeg  --dataset D --subject S --from DIR --fsaverage DIR [--nsp-subject P]
+                                                                                      MNE's EEG source package (nsp mne-eeg-source): EEG, events,
+                                                                                      kernels on fsaverage's ico-5 cortex, band power (``mne_eeg.py``)
+    nxr-convert bids-ieeg --dataset D --subject S --bids ROOT [--template-surfaces DIR] [--surface N] [--max-distance-mm D]
+                                                                                      a BIDS-iEEG subject; its contacts on the template (``bids_ieeg.py``)
     nxr-convert remove   --dataset D --subject S [--node PATH]                      delete a subject, or one node of it
     nxr-convert list <protocol> | scan <protocol>                                     what a protocol holds
     nxr-convert atlas default-subject | build | reduce | info                         the dyadic atlas (``atlas/cli.py``)
@@ -329,6 +339,24 @@ def main(argv: list[str] | None = None) -> int:
     pbs.add_argument("--subject", required=True)
     pbs.add_argument("--from", dest="src", required=True, help="{recordings: [{name, segments: [{label, start_s[], stop_s[]}]}]}")
     pbs.add_argument("--replace", action="store_true")
+    pmn = sub.add_parser("mne-eeg", help="MNE-Python's EEG source package (nsp mne-eeg-source) into a subject (made if absent): the fsaverage "
+                         "ico-5 cortex its kernels index, the EEG channels and recording, its annotations as events, the MNE / dSPM / eLORETA "
+                         "kernels, the per-stage band power — no source time series (needs nxr-convert[mne])")
+    pmn.add_argument("--dataset", required=True)
+    pmn.add_argument("--subject", required=True)
+    pmn.add_argument("--from", dest="src", required=True, help="the package's folder (<p>_task-<t>_desc-preproc_eeg.fif, <p>_kernel.json, …)")
+    pmn.add_argument("--fsaverage", required=True, help="the fsaverage subject folder MNE ships (surf/, label/, bem/fsaverage-ico-5-src.fif)")
+    pmn.add_argument("--nsp-subject", default=None, help="the package's file prefix (default: the subject)")
+    pie = sub.add_parser("bids-ieeg", help="a BIDS-iEEG subject (BrainVision runs, channels, MNI electrodes, events) into a subject (made if "
+                         "absent); with a template surface, each contact's nearest vertex, its distance and its parcel")
+    pie.add_argument("--dataset", required=True)
+    pie.add_argument("--subject", required=True, help="the BIDS subject (sub-<label>); also the subject's name")
+    pie.add_argument("--bids", required=True, help="the BIDS root")
+    pie.add_argument("--space", default="MNI152NLin2009aSym", help="the electrodes' space-<label> (default MNI152NLin2009aSym)")
+    pie.add_argument("--template-surfaces", default=None, help="the template derivative's folder (tpl-<space>_hemi-{L,R}_<surface>.surf.gii, "
+                     "hemi-{L,R}_atlas-<atlas>_dseg.label.gii + .tsv): imported once as the dataset's template (needs nibabel)")
+    pie.add_argument("--surface", default="midthickness", help="the template surface the contacts are mapped onto (default midthickness)")
+    pie.add_argument("--max-distance-mm", type=float, default=5.0, help="a contact farther from that surface is not on the cortex (default 5)")
     pq = sub.add_parser("qc", help="sensor QC of a subject's recordings: the PSD Field, its measures and qc_flag, meg-qc's metrics")
     pq.add_argument("--dataset", required=True)
     pq.add_argument("--subject", required=True)
@@ -478,6 +506,24 @@ def _run(a) -> int:
             with sub.composition():
                 r = convert_condition(sub, bst_root=root, condition=a.condition, write_gain=not a.no_gain,
                                       all_surfaces=a.all_surfaces, progress=_print, resample=a.resample, **plan)
+            write_catalog(ds.root)
+            _print({"stage": "result", **r})
+            return 0
+        if a.cmd in ("mne-eeg", "bids-ieeg"):
+            if a.cmd == "bids-ieeg" and a.template_surfaces:
+                from .bids_ieeg import ensure_template
+                _print({"stage": "template", **ensure_template(ds, a.template_surfaces, space=a.space, emit=_print)})
+            fmt = "mne" if a.cmd == "mne-eeg" else "bids-ieeg"
+            sub = (Subject.open(ds, a.subject, created_by=stamp()) if ds.subject(a.subject)
+                   else Subject.create(ds, a.subject, source_format=fmt, source_path=str(Path(a.src if fmt == "mne" else a.bids).resolve()),
+                                       created_by=stamp()))
+            with sub.composition():
+                if a.cmd == "mne-eeg":
+                    from .mne_eeg import import_mne_eeg
+                    r = import_mne_eeg(sub, a.src, fsaverage=a.fsaverage, prefix=a.nsp_subject, progress=_print)
+                else:
+                    from .bids_ieeg import import_bids_ieeg
+                    r = import_bids_ieeg(sub, a.bids, space=a.space, surface=a.surface, max_distance_mm=a.max_distance_mm, progress=_print)
             write_catalog(ds.root)
             _print({"stage": "result", **r})
             return 0

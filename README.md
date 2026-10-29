@@ -4,7 +4,7 @@ Converts a [Brainstorm](https://neuroimage.usc.edu/brainstorm/) protocol (MEG/EE
 volumes, head models, inverse kernels, source maps, fibres and connectomes) into an **nxr datastore**: a folder that the
 [Cortical Flow](https://corticalflow.app) desktop app opens.
 
-Version **0.2.15**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). From 0.2.12 new subjects convert in parallel (`fragment --new`) and a map over time (an fMRI BOLD series, its confounds) is converted, not skipped. Each dataset's `dataset.sqlite` carries the schema number as
+Version **0.2.19**, which writes **database schema 49**. From 0.2.11 a selection's codes or picks are its array only: nothing per element is a row (`selection_element` stays empty). From 0.2.12 new subjects convert in parallel (`fragment --new`) and a map over time (an fMRI BOLD series, its confounds) is converted, not skipped. Each dataset's `dataset.sqlite` carries the schema number as
 `PRAGMA user_version`. The app opens only databases with the version it was built for, and the converter opens only its
 own version and refuses any other. Use a converter release that matches your desktop app (0.2.x for Cortical Flow 0.2).
 
@@ -38,12 +38,13 @@ pipx install nxr-convert
 Check the install:
 
 ```bash
-nxr-convert --version        # nxr-convert 0.2.15 (database schema 49)
+nxr-convert --version        # nxr-convert 0.2.19 (database schema 49)
 ```
 
 The `atlas` commands also need the `atlas` extra (`nibabel`), plus Node.js and the nxr-compute Node binding
-(`NXR_COMPUTE`). Install the extra with `uv tool install "nxr-convert[atlas]"`.
-The conversion commands below need neither.
+(`NXR_COMPUTE`). Install the extra with `uv tool install "nxr-convert[atlas]"`. `mne-eeg` needs the `mne` extra (MNE-Python)
+and `bids-ieeg --template-surfaces` the `ieeg` extra (`nibabel`).
+The Brainstorm conversion commands below need none of them.
 
 ## Use with the Cortical Flow desktop app
 
@@ -123,8 +124,53 @@ nxr-convert hodge   --dataset D --subject S --from <dir> [--nsp-subject S] [--re
 nxr-convert interp  --dataset D --subject S --from SRC --to DST [--replace]
 nxr-convert carry-inverse --dataset D --subject S --from <dataset> --kernel NAME --session C   # 0.2.11: a kernel from another store of the subject
 nxr-convert resample --dataset D --subject S --recording NAME --to HZ [--name N]   # 0.2.10: a stored recording resampled, beside it
+nxr-convert map     --dataset D --subject S --file results_*.mat … --bst-root <protocol> [--provenance FILE] [--replace]   # 0.2.18: what made the map, in its producer
+nxr-convert badsegments --dataset D --subject S --from <bad segments JSON> [--replace]   # 0.2.17: onto each recording and its resampled copies
+nxr-convert carry-hodge --dataset D --subject S --from <dataset> [--from-subject S] [--replace]   # 0.2.18: a stored Hodge–Dirac basis from another dataset
 nxr-convert remove  --dataset D --subject S [--node <store path>]   # the subject, or one node of it
 ```
+
+### Eigenmodes and registration to a template (0.2.15–0.2.16)
+
+```bash
+nxr-convert modes --dataset D --subject S --work DIR [--modes K] [--surface NAME] [--replace]   # solve the Hodge–Dirac basis from the store
+nxr-convert modes --dataset D --subject S --work DIR --export | --input FILE               # the solve's input, to solve elsewhere
+nxr-convert transfermatrix --dataset D --subject S --subject-solve DIR --template-solve DIR --modes K --out DIR [--template T] [--check]
+nxr-convert registerkernel --dataset D --subject S --kernel NAME --subject-solve DIR|store --template-solve DIR --modes K --out DIR [--replace]
+nxr-convert carry --dataset D --subject S (--field NAME | --selection NAME) [--template T] [--replace]   # a native map or points onto the template
+nxr-convert rotationplane --dataset D --subject S --kernel K --recording R [--band LO HI] [--replace]
+nxr-convert atlas build … --recordings-like _300Hz                                         # 0.2.17: only the recordings whose name contains it
+```
+
+`registerkernel --subject-solve store` (0.2.16) registers from the subject's stored basis (the mass rebuilt from its glued
+surface), so no solve folder is needed.
+
+### MNE-Python EEG source packages and BIDS-iEEG
+
+```bash
+nxr-convert mne-eeg   --dataset D --subject S --from <package dir> --fsaverage <fsaverage dir> [--nsp-subject P]
+nxr-convert bids-ieeg --dataset D --subject sub-X --bids <BIDS root> [--template-surfaces DIR] [--space MNI152NLin2009aSym] \
+    [--surface midthickness] [--max-distance-mm 5]
+```
+
+`mne-eeg` reads an MNE-Python EEG source package (needs the `mne` extra: `uv tool install "nxr-convert[mne]"`): the
+preprocessed EEG (`<P>_task-<t>_desc-preproc_eeg.fif`, split parts followed) becomes a recording on the EEG channels — their
+positions carried head → MRI by `<P>_eeg-trans.fif` — with its annotations as events (`BAD_*` the bad segments; the channels
+a mark names kept on the event). Its kernels `<P>_kernel-{MNE,dSPM,eLORETA}_ori-normal.npy` (rows = the vertices
+`<P>_kernel.json` names in fsaverage's ico-5 source space) become inverse kernels on `sources/cortex_white_ico5`, the white
+surface at exactly those vertices (MNE's ico-5 triangles, lh then rh, its sphere and parcellations; the primary), with the
+noise covariance from `<P>_eeg-inv.fif`. `<P>_stage_bandpower.npz` becomes one source-power Field per scored stage on
+cortex × bands (`frequency/bandpower_<stage>`, `_relative`) and a sensor-power one. No source time series are written:
+a source is a kernel row times the EEG.
+
+`bids-ieeg` reads a BIDS-iEEG subject: each BrainVision run (`*_ieeg.vhdr`, read with numpy: IEEE_FLOAT_32, INT_16,
+INT_32, multiplexed or vectorized; scaled to volts) is a session named by its entities (`task-sleep_acq-N2_run-01`), on
+the channels of its `channels.tsv` (status → flags) at the contacts of `*_space-<space>_electrodes.tsv`, with its
+`events.tsv` as events. `--template-surfaces` imports the template derivative's GIFTI surfaces and parcellations once as the
+dataset's template subject `tpl-<space>` (needs the `ieeg` extra, `nibabel`). Each channel set's contacts are then mapped to
+their nearest vertex of the template's `--surface`: a csr operator `<channels>_to_<surface>` (a 1 per contact within
+`--max-distance-mm`), the distance and vertex as Fields of the channels, and the set `<channels>_cortex` (`on_cortex` and the
+contact's parcel in each parcellation). A run whose session is already in the subject is skipped.
 
 `hodge` adds the Hodge–Dirac eigenmodes of the subject's primary cortex from a solve's outputs in `<dir>`
 (split layout, 0.2.5: `<S>_hodge_exact_modes/_exact_lambda/_coexact_modes/_coexact_lambda.npy` in place of `_hodge_modes.npy`; found by which files exist)

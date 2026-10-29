@@ -51,3 +51,24 @@ def test_resample_writes_a_recording_beside_the_stored_one(ds_with_recording, ca
     p = np.abs(np.fft.rfft(y[0])) ** 2
     assert np.fft.rfftfreq(y.shape[1], 1 / 300)[np.argmax(p[1:]) + 1] == pytest.approx(10, abs=.05)   # the 10 Hz rhythm kept
     assert main(["resample", "--dataset", str(folder), "--subject", "sub-01", "--recording", REC, "--to", "300"]) == 1   # present: refused
+
+
+def test_badsegments_go_onto_the_recording_and_its_resampled_copy(ds_with_recording, capsys, tmp_path):
+    folder, _ = ds_with_recording
+    assert main(["resample", "--dataset", str(folder), "--subject", "sub-01", "--recording", REC, "--to", "300"]) == 0
+    src = tmp_path / "bad.json"
+    src.write_text(json.dumps({"subject": "sub-01", "settings": {"ignored": 1}, "recordings": [{"name": REC, "sfreq": FS, "segments": [
+        {"label": "bad_1-7Hz", "start_s": [1.0, 10.0], "stop_s": [2.5, 10.5]}, {"label": "bad_40-240Hz", "start_s": [20.0], "stop_s": [21.0]},
+        {"label": "blink", "start_s": [3.0], "stop_s": [3.2]}]}]}))
+    args = ["badsegments", "--dataset", str(folder), "--subject", "sub-01", "--from", str(src)]
+    assert main(args) == 0
+    res = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert [(r["recording"], r["bad_segments"], r["seconds"]) for r in res["recordings"]] == [(REC, 3, 3.0), (f"{REC}_300Hz", 3, 3.0)]
+    with open_dataset(folder) as ds:
+        for name in (REC, f"{REC}_300Hz"):
+            sel = ds.db.one("SELECT s.* FROM selection s JOIN field f ON f.id = s.of_field_id WHERE f.name = ? AND s.name LIKE '%\\_bad\\_segments' ESCAPE '\\'", name)
+            spans = ds.db.all("SELECT start, stop, code FROM selection_span WHERE selection_id = ? ORDER BY start", sel["id"])
+            assert sel["type"] == "spans" and [(r["start"], r["stop"]) for r in spans] == [(1.0, 2.5), (10.0, 10.5), (20.0, 21.0)]   # the blink is not bad
+            assert spans[0]["code"] == spans[1]["code"] != spans[2]["code"]                      # a code per label
+    assert main(args) == 1                                                                       # present: refused
+    assert main(args + ["--replace"]) == 0

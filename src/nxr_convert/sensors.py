@@ -43,7 +43,9 @@ def _family(values: list[str]) -> tuple[list[int], list[str]]:
 
 
 def export_sensors(sub: Subject, channel_mat: dict, channel_flag: np.ndarray, *, name: str, session: str,
-                   source_sha1: str | None = None) -> dict:
+                   source_sha1: str | None = None, cs_key: str = "scs", producer: dict | None = None) -> dict:
+    """``cs_key``: the coordinate system the positions are in (Brainstorm's ``scs``; another reader's its own, in metres);
+    ``producer`` rides in the manifold's provenance."""
     channels = struct_rows(channel_mat["Channel"], "Name")
     names = [str(c["Name"]) for c in channels]
     types = [str(c["Type"]) for c in channels]
@@ -71,11 +73,11 @@ def export_sensors(sub: Subject, channel_mat: dict, channel_flag: np.ndarray, *,
     mid = uuid7()
     pos = loc.astype(np.float32)
     sub.manifold(id=mid, name=name, path=path, type="points", n_vertices=n, session=session,
-                 topology={"kind": "none", "rank": 0}, geometry={"form": "stored", "cs_key": "scs", "positions_path": path},
+                 topology={"kind": "none", "rank": 0}, geometry={"form": "stored", "cs_key": cs_key, "positions_path": path},
                  producer_json=jdump({"modalities": modalities, "channel_units_source": "derived-from-type",
                                       **({"positions": "bipolar channels at the midpoint of Loc's two contacts "
                                                        f"(both: {name}_contact1/2)", "bipolar": bipolar} if bipolar else {}),
-                                      **({"source_sha1": source_sha1} if source_sha1 else {})}),
+                                      **({"source_sha1": source_sha1} if source_sha1 else {}), **(producer or {})}),
                  populate=lambda at: sub.write_array(path, pos, table="manifold", id=mid))
 
     if bipolar:
