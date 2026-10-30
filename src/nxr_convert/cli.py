@@ -33,7 +33,7 @@
                                                                                       the templates-and-references dataset (``templates.py``)
     nxr-convert map      --dataset D --subject S --file results_*.mat|matrix_*.mat … --bst-root P [--session C]
                                                                                       add static maps (surface or region)
-    nxr-convert qc       --dataset D --subject S [--megqc <sub>.tar.gz] [--replace]  sensor QC of the recordings (``qc.py``)
+    nxr-convert qc       --dataset D --subject S [--megqc <sub>.tar.gz] [--line-freq HZ] [--replace]  sensor QC of the recordings (``qc.py``)
     nxr-convert migrate  --from nxr.sqlite --dataset D                              a schema-48 shared database into a dataset at this schema
     nxr-convert fragment --dataset D (--subject S | --new) --to DIR                  one subject's writable copy, for a parallel job
     nxr-convert merge    --dataset D FRAGMENT … [--replace]                          fold fragments back, serially (``shared_dataset.py``)
@@ -361,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     pq.add_argument("--dataset", required=True)
     pq.add_argument("--subject", required=True)
     pq.add_argument("--megqc", default=None, help="meg-qc's <sub>.tar.gz (its session metrics become measurements of the rest runs)")
+    pq.add_argument("--line-freq", type=float, default=60.0, help="the mains frequency in Hz (line_residual_db at its harmonics; default 60)")
     pq.add_argument("--replace", action="store_true")
     pmg = sub.add_parser("migrate", help="bring a schema-48 shared database into a dataset folder at this schema, every node's "
                          "zarr.json rewritten from its row (48 → 49 only; an exception to D139)")
@@ -624,7 +625,7 @@ def _run(a) -> int:
         elif a.cmd == "qc":
             from .qc import add_qc
             with sub.composition():
-                info = add_qc(sub, megqc=a.megqc, replace=a.replace, progress=_print)
+                info = add_qc(sub, megqc=a.megqc, replace=a.replace, line_freq=a.line_freq, progress=_print)
             _print({"stage": "result", **info})
         elif a.cmd == "interp":
             from .interp import add_interpolation

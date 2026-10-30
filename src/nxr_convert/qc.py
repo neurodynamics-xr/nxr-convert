@@ -5,10 +5,14 @@ Per recording (every run, task-noise included):
   frequency/<rec>_psd_preprocessed   Field   the sensor PSD of the store's own signal: Welch, 4 s Hann windows, 50 % overlap,
                                              one-sided density (T²/Hz), every channel, on channels × <rec>_freq (0 … fs/2, 0.25 Hz)
   measurements on the recording's channel ``_names`` selection, of the PSD field: per channel (code = channel index) and per
-  recording (code null, the median over good MEG channels): line_residual_db · muscle_power · muscle_ratio_db ·
+  recording (code null, the median over the good channels of one sensor type: magnetometers where the system has both
+  magnetometers and gradiometers, as Elekta/MEGIN does): line_residual_db · muscle_power · muscle_ratio_db ·
   alpha_peak_hz · alpha_peak_power · aperiodic_slope · channel_status · excluded_fraction · qc_flag (the v1 rule, stated in
   the ``qc flag`` dictionary)
   meg-qc's session metrics (A1–A4, I1–I2, H1, K1) as measurements of the rest recordings (of the recording field).
+MEG channels are those typed MEG, MEG MAG or MEG GRAD (not MEG REF); flat / noisy is judged within each type, as magnetometers
+(T) and gradiometers (T/m) are not on one scale, and a gradiometer's power measurements carry (T/m)². The line frequency is
+``--line-freq`` (default 60 Hz; 50 Hz mains elsewhere).
 Not here: the ``clean`` stage (SSP + exclusion), the PSD figure, the gallery, and the ``<rec>_qc_rejected`` spans — bst-timefreq-gr
 records how many 4 s epochs it rejected, not which, and its thresholds do not reproduce its counts on the store's (pre-SSP)
 sensors (one rest run: 51 epochs over its peak-to-peak threshold against its 6, measured 2026-10-25), so the epochs are not
@@ -31,13 +35,14 @@ from .db import now_utc
 BY = "nxr-convert qc"
 WIN_S, OVERLAP = 4.0, 0.5
 MEASURES = {   # name: (unit, reduction, description)
-    "line_residual_db": ("dB", "max", "power at 60·k ± 0.5 Hz over its ± 2–5 Hz neighbours, the max over k (60·k ≤ 300 Hz)"),
+    "line_residual_db": ("dB", "max", "power at L·k ± 0.5 Hz over its ± 2–5 Hz neighbours, the max over k = 1..5 (L the line "
+                                      "frequency, 60 Hz unless stated)"),
     "muscle_power": ("T²", "sum", "65–115 Hz band power"),
     "muscle_ratio_db": ("dB", "mean", "65–115 Hz power over 1–45 Hz power"),
     "alpha_peak_hz": ("Hz", "mean", "the max of the 1/f-detrended spectrum in 7–13 Hz; null without ≥ 1 dB prominence"),
     "alpha_peak_power": ("T²/Hz", "mean", "the PSD at the alpha peak"),
     "aperiodic_slope": ("1", "mean", "log-log slope of the PSD over 2–40 Hz, 7–13 Hz excluded"),
-    "channel_status": ("1", "max", "0 ok · 1 flat · 2 noisy (median power < 1e-3 / > 10 × the channels' median)"),
+    "channel_status": ("1", "max", "0 ok · 1 flat · 2 noisy (median power < 1e-3 / > 10 × the median of the channels of its type)"),
     "excluded_fraction": ("1", "mean", "the share of the recording in rejected epochs"),
     "qc_flag": ("1", "max", "0 pass · 1 check · 2 fail (the qc flag dictionary's rule)"),
 }
@@ -45,6 +50,7 @@ RULE = {0: ("pass", "otherwise"),
         1: ("check", "no alpha peak (rest runs), muscle_ratio_db > −10, aperiodic_slope outside [−3, −0.5], > 3 % MEG channels flat or "
                      "noisy, or line_residual_db > 3"),
         2: ("fail", "excluded_fraction > 0.5, > 10 % MEG channels flat or noisy, or line_residual_db > 10")}
+MEG_TYPES = ("MEG", "MEG MAG", "MEG GRAD")     # Brainstorm's channel types; MEG REF (CTF references) is not measured
 MEGQC = ("amp_p2p_pT", "lf_rest_vs_noise_dB", "lf_front_vs_back_dB", "ref_rest_vs_noise_dB", "n_bad_channels", "rest_s", "head_disp_mm",
          "kept_frac")
 
@@ -61,13 +67,13 @@ def _band(f, P, lo, hi):
     return P[..., m].sum(-1) * (f[1] - f[0])
 
 
-def measures(f: np.ndarray, P: np.ndarray) -> dict[str, np.ndarray]:
+def measures(f: np.ndarray, P: np.ndarray, line_freq: float = 60.0) -> dict[str, np.ndarray]:
     """per row of P [n × f]: the spectrum measures (alpha null → nan)"""
     P = np.maximum(np.atleast_2d(P), np.finfo(float).tiny)
     out: dict[str, np.ndarray] = {}
     lr = np.full(len(P), -np.inf)
     for k in range(1, 6):
-        c = 60.0 * k
+        c = line_freq * k
         if c + 5 > f[-1]:
             break
         on = (np.abs(f - c) <= .5)
@@ -90,10 +96,14 @@ def measures(f: np.ndarray, P: np.ndarray) -> dict[str, np.ndarray]:
     return out
 
 
-def channel_status(f: np.ndarray, P: np.ndarray) -> np.ndarray:
+def channel_status(f: np.ndarray, P: np.ndarray, groups: np.ndarray | None = None) -> np.ndarray:
+    """per row of P: 0 ok · 1 flat · 2 noisy, against the median of the rows of the same group (sensor type)"""
     b = (f >= 1) & (f <= 100)
     med = np.median(P[:, b], 1)
-    ref = np.median(med)
+    groups = np.zeros(len(P), int) if groups is None else np.asarray(groups)
+    ref = np.empty_like(med)
+    for g in np.unique(groups):
+        ref[groups == g] = np.median(med[groups == g])
     return np.where(med < 1e-3 * ref, 1, np.where(med > 10 * ref, 2, 0))
 
 
@@ -121,14 +131,20 @@ def _factors(db, manifold_id: str) -> list[str]:
                                              "WHERE p.id = ? ORDER BY d.ordinal", manifold_id)]
 
 
-def _meg(sub: Subject, channels_id: str, n: int) -> np.ndarray:
-    """the MEG channels, by the channel labelling's ``type`` partition (D111) — every channel when there is none"""
+def _meg(sub: Subject, channels_id: str, n: int) -> tuple[np.ndarray, list[str]]:
+    """each channel's MEG sensor type, by the channel labelling's ``type`` partition (D111): an index into the returned type
+    names, −1 for a channel that is not MEG — every channel one type ("MEG") when there is no partition"""
     t = sub.db.one("SELECT s.path, s.dictionary_id FROM selection s JOIN selection l ON l.id = s.member_of_id WHERE s.name = 'type' "
                    "AND s.manifold_id = ? AND l.name LIKE '%\\_labels' ESCAPE '\\'", channels_id)
     if t is None:
-        return np.ones(n, bool)
-    code = sub.db.value("SELECT code FROM dictionary_entry WHERE dictionary_id = ? AND name = 'MEG'", t["dictionary_id"])
-    return np.asarray(zarr.open_array(str(sub.at(t["path"])), mode="r")[:]) == code
+        return np.zeros(n, int), ["MEG"]
+    codes = np.asarray(zarr.open_array(str(sub.at(t["path"])), mode="r")[:])
+    g, names = np.full(n, -1), []
+    for e in sub.db.all("SELECT code, name FROM dictionary_entry WHERE dictionary_id = ? ORDER BY code", t["dictionary_id"]):
+        if e["name"] in MEG_TYPES and (codes == e["code"]).any():
+            g[codes == e["code"]] = len(names)
+            names.append(e["name"])
+    return g, names
 
 
 def _dictionaries(sub: Subject) -> None:
@@ -140,7 +156,8 @@ def _dictionaries(sub: Subject) -> None:
     sub.dictionary("channel status", ["ok", "flat", "noisy"], scope="dataset")
 
 
-def add_qc(sub: Subject, *, megqc: str | Path | None = None, replace: bool = False, block: int = 16, progress=None) -> dict:
+def add_qc(sub: Subject, *, megqc: str | Path | None = None, replace: bool = False, block: int = 16, line_freq: float = 60.0,
+           progress=None) -> dict:
     db, out, stamp = sub.db, [], now_utc()
     mq = read_megqc(megqc) if megqc else {}
     _dictionaries(sub)
@@ -164,7 +181,11 @@ def add_qc(sub: Subject, *, megqc: str | Path | None = None, replace: bool = Fal
             f, p = psd(np.asarray(a[c0:c0 + block], np.float64), fs)
             P = np.zeros((n_ch, len(f)), np.float32) if P is None else P
             P[c0:c0 + block] = p
-        meg = _meg(sub, ch_id, n_ch)
+        groups, types = _meg(sub, ch_id, n_ch)
+        meg = groups >= 0
+        if not meg.any():
+            raise ValueError(f"{name}: no MEG channels (types {', '.join(MEG_TYPES)})")
+        ref = types.index("MEG MAG") if "MEG MAG" in types else 0     # the recording's measures: one sensor type, never pooled
         lpath = f"frequency/{name}_freq"
         line = db.value("SELECT id FROM manifold WHERE subject_id = ? AND path = ?", sub.id, lpath) or sub.manifold(
             name=f"{name}_freq", path=lpath, type="line", n_vertices=len(f), session=rec["session"], topology={"kind": "lattice", "rank": 1},
@@ -176,11 +197,13 @@ def add_qc(sub: Subject, *, megqc: str | Path | None = None, replace: bool = Fal
                         data=P, derived_from_id=rec["id"], session=rec["session"], unit=unit,
                         description="the sensor PSD of the stored signal (notch + high-pass as stored; no SSP, no exclusion)",
                         producer_json=jdump({"stage": "preprocessed", "window_s": WIN_S, "overlap": OVERLAP, "window": "hann", "scaling": "density",
-                                             "excluded": "none marked", "ssp": None, "by": BY}))
-        m = measures(f, P)
-        st = channel_status(f, P[meg])
+                                             "excluded": "none marked", "ssp": None, "by": BY, "line_freq_hz": line_freq,
+                                             "meg_types": types, "recording_measures_from": types[ref]}))
+        m = measures(f, P, line_freq)
+        st = channel_status(f, P[meg], groups[meg])
         bad = float((st > 0).mean())
-        rm = {k: float(v[0]) for k, v in measures(f, np.median(P[meg][st == 0], 0)).items()}
+        good = (groups[meg] == ref) & (st == 0)
+        rm = {k: float(v[0]) for k, v in measures(f, np.median(P[meg][good if good.any() else groups[meg] == ref], 0), line_freq).items()}
         rm.update(excluded_fraction=0.0, channel_status=float(st.max()))
         rest = "task-rest" in name
         rm["qc_flag"] = float(qc_flag(rm, bad, rest))
@@ -191,6 +214,11 @@ def add_qc(sub: Subject, *, megqc: str | Path | None = None, replace: bool = Fal
         rows += [(int(i), "channel_status", float(s)) for i, s in zip(idx, st)]
         rows += [(None, k, v) for k, v in rm.items() if np.isfinite(v)]
         unit_of = {k: u for k, (u, _, _) in MEASURES.items()}
+        grad = {int(i) for i in np.where(groups == (types.index("MEG GRAD") if "MEG GRAD" in types else -2))[0]}
+
+        def _unit(code, k):
+            u = unit_of[k] if unit_of[k] != "T²/Hz" else unit
+            return "(T/m)²" + u[2:] if u and code in grad and u.startswith("T²") else u     # a gradiometer's power: (T/m)²
         with db.tx():
             if names is None:
                 raise KeyError(f"{name}: no channel _names selection on its channels")
@@ -198,7 +226,7 @@ def add_qc(sub: Subject, *, megqc: str | Path | None = None, replace: bool = Fal
             db.execute("DELETE FROM selection_measurement WHERE selection_id = ? AND of_field_id = ? AND computed_by = 'meg-qc'", names["id"], rec["id"])
             for code, k, v in rows:
                 db.insert("selection_measurement", {"selection_id": names["id"], "code": code, "of_field_id": fid, "measure": k, "value": v,
-                                                    "unit": unit_of[k] if unit_of[k] != "T²/Hz" else unit, "computed_utc": stamp, "computed_by": BY})
+                                                    "unit": _unit(code, k), "computed_utc": stamp, "computed_by": BY})
             ses = next((v for k, v in mq.items() if f"_{k}_" in f"_{name}_"), None) if rest else None     # meg-qc keys a session 'ses-02'
 
             for k, v in (ses or {}).items():

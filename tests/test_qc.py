@@ -72,3 +72,35 @@ def test_qc_writes_the_psd_its_measures_and_the_flag(ds_with_recording, capsys):
         mq = db.all("SELECT measure, value FROM selection_measurement WHERE computed_by = 'meg-qc'")
         assert sorted(m["measure"] for m in mq) == ["megqc_amp_p2p_pT", "megqc_kept_frac", "megqc_n_bad_channels"]   # once, after --replace
         assert db.value("SELECT count(*) FROM dictionary WHERE name IN ('measure', 'qc flag', 'channel status') AND scope = 'dataset'") == 3
+
+
+def test_magnetometers_and_gradiometers_are_judged_apart_at_the_stated_line_frequency(tmp_path, capsys):
+    """An Elekta/MEGIN-like recording: magnetometers (T) and gradiometers (T/m, ~100 × larger numbers), 50 Hz mains, one flat
+    gradiometer (and signal()'s flat channel 3, a magnetometer). Pooled, every magnetometer would read as flat; within their
+    type only the two flat channels do."""
+    ds = create_dataset(tmp_path / "store", "ds")
+    sub = Subject.create(ds, "sub-01", source_format="brainstorm", immediate=True)
+    x, t = signal(n_meg=18, seed=1)
+    x = x[:18].astype(np.float64)
+    x += np.std(x[0]) * np.sin(2 * np.pi * 50 * t)                         # 50 Hz mains on every channel
+    x[6:] *= 100                                                             # gradiometers: T/m
+    x[9] = 1e-20 * np.random.default_rng(2).standard_normal(x.shape[1])     # a flat gradiometer
+    chans = [{"Name": f"MEG{i:03d}1", "Type": "MEG MAG", "Loc": np.zeros((3, 1)), "Group": ""} for i in range(6)] + [
+        {"Name": f"MEG{i:03d}2", "Type": "MEG GRAD", "Loc": np.zeros((3, 1)), "Group": ""} for i in range(6, 18)]
+    s = export_sensors(sub, {"Channel": chans}, np.ones(18), name="channel_x", session="ses-01_task-rest_run-01")
+    export_timeseries(sub, "sub-01_ses-01_task-rest_run-01_meg", {"F": x.astype(np.float32), "Time": t}, session="ses-01_task-rest_run-01",
+                      channels_id=s["id"], channel_names=[c["Name"] for c in chans])
+    ds.close()
+    folder = tmp_path / "store" / "ds"
+    assert main(["qc", "--dataset", str(folder), "--subject", "sub-01", "--line-freq", "50"]) == 0
+    res = json.loads(capsys.readouterr().out.strip().splitlines()[-1])["recordings"][0]
+    assert res["meg"] == 18 and res["flagged_channels"] == 2
+    with open_dataset(folder) as ds:
+        f = ds.db.one("SELECT * FROM field WHERE kind = 'psd'")
+        pj = json.loads(f["producer_json"])
+        assert pj["line_freq_hz"] == 50 and pj["meg_types"] == ["MEG MAG", "MEG GRAD"] and pj["recording_measures_from"] == "MEG MAG"
+        ms = ds.db.all("SELECT * FROM selection_measurement WHERE of_field_id = ?", f["id"])
+        per = {(m["code"], m["measure"]): m for m in ms}
+        assert [per[(i, "channel_status")]["value"] for i in (0, 3, 7, 9)] == [0, 1, 0, 1]
+        assert per[(None, "line_residual_db")]["value"] > 10 and per[(None, "alpha_peak_hz")]["value"] == pytest.approx(10, abs=.25)
+        assert per[(7, "muscle_power")]["unit"] == "(T/m)²" and per[(0, "muscle_power")]["unit"] == "T²"
