@@ -171,6 +171,57 @@ def test_the_contacts_on_the_template_cortex(converted):
     assert labels("Demo2") == ["Lower region L", "Lower region L", "unassigned", "Upper region R", "Lower region R", "unassigned"]
 
 
+def _fsaverage_map(root, n=None, drop=False):
+    d = root / "fsa"
+    d.mkdir(exist_ok=True)
+    nv = len(icosphere(3, radius=R_MM)[0])
+    for k, h in enumerate(("L", "R")):
+        m = nv - 1 if (drop and h == "R") else nv
+        np.savez(d / f"tpl-{SPACE}_to_fsaverage_hemi-{h}.npz", fsaverage_vertex=(np.arange(m) + 1000 * k).astype(np.int32),
+                 fsaverage5_vertex=(np.arange(m) % 10242).astype(np.int32), distance_mm=np.full(m, 0.5 + k, np.float32),
+                 recon_vertex=np.zeros(m, np.int32))
+    return d, nv
+
+
+def test_the_fsaverage_lookup_of_the_nearest_vertex(tmp_path):
+    rng = np.random.default_rng(1)
+    _subject(tmp_path / "bids", rng)
+    tpl = _template(tmp_path)
+    fsa, nv = _fsaverage_map(tmp_path)
+    assert main(["dataset", "create", str(tmp_path / "store"), "ieeg"]) == 0
+    store = tmp_path / "store" / "ieeg"
+    assert main(["bids-ieeg", "--dataset", str(store), "--subject", "sub-01", "--bids", str(tmp_path / "bids"),
+                 "--template-surfaces", str(tpl), "--fsaverage-map", str(fsa)]) == 0
+    ds = open_dataset(store, lock=False)
+    try:
+        sub = Subject.open(ds, "sub-01")
+        v = read(sub, "timeseries/channel_ieeg_cortex_vertex").astype(int)
+        has = v >= 0
+        assert has.sum() == 5 and v[NAMES.index("ECG")] == -1
+        right = v >= nv                                           # the template's vertices run lh then rh
+        want = np.where(right, v - nv + 1000, v)
+        assert (read(sub, "timeseries/channel_ieeg_cortex_fsaverage")[has] == want[has]).all()
+        assert (read(sub, "timeseries/channel_ieeg_cortex_fsaverage5")[has] == (np.where(right, v - nv, v) % 10242)[has]).all()
+        dist = read(sub, "timeseries/channel_ieeg_cortex_fsaverage_distance")
+        assert np.allclose(dist[has], np.where(right, 1.5, 0.5)[has] / 1000.0) and np.isnan(dist[~has]).all()
+        assert read(sub, "timeseries/channel_ieeg_cortex_fsaverage")[~has].tolist() == [-1]
+        prov = json.loads(sub.find("operator", "channel_ieeg_to_midthickness")["producer_json"])["fsaverage_map"]
+        assert sorted(prov) == [f"tpl-{SPACE}_to_fsaverage_hemi-L.npz", f"tpl-{SPACE}_to_fsaverage_hemi-R.npz"]
+        assert all(len(x) == 64 for x in prov.values())
+    finally:
+        ds.close()
+
+
+def test_a_map_of_the_wrong_length_is_refused(tmp_path, capsys):
+    _subject(tmp_path / "bids", np.random.default_rng(1))
+    tpl = _template(tmp_path)
+    fsa, _ = _fsaverage_map(tmp_path, drop=True)
+    assert main(["dataset", "create", str(tmp_path / "store"), "ieeg"]) == 0
+    assert main(["bids-ieeg", "--dataset", str(tmp_path / "store" / "ieeg"), "--subject", "sub-01", "--bids", str(tmp_path / "bids"),
+              "--template-surfaces", str(tpl), "--fsaverage-map", str(fsa)]) != 0
+    assert "the template's hemisphere R has" in capsys.readouterr().out
+
+
 def test_a_run_already_there_is_skipped(converted, capsys):
     converted["ds"].close()
     capsys.readouterr()

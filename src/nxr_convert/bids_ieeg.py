@@ -22,6 +22,10 @@ surface (default ``midthickness``), as fibre ends are (``fibers.py``):
                                                   lands on the cortex); a farther contact has no entry
     timeseries/<channels>_cortex_distance   Field  of it, on the channels: the distance to that vertex, m (NaN: no position)
     timeseries/<channels>_cortex_vertex     Field  of it, integer: the nearest vertex (-1: no position), on or off the cortex
+    timeseries/<channels>_cortex_fsaverage / _fsaverage5 / _fsaverage_distance     Fields, with ``fsaverage_map`` only: the
+                                                  contact's nearest vertex looked up in a template-to-fsaverage map (fsaverage
+                                                  ico7 index · fsaverage5 index, integer, -1: no position; the map's distance
+                                                  from the template vertex to its registration surface, m, NaN: no position)
     timeseries/<channels>_cortex        Selection  a set: ``on_cortex`` (on cortex · off cortex · no position) and, per
                                                   parcellation of that surface, the contact's PARCEL (its nearest vertex's
                                                   code in the template's dictionary; an off-cortex contact ``unassigned``)
@@ -292,9 +296,32 @@ def _channels(sub: Subject, vhdr: Path, h: dict, chans: list[dict], pos, group, 
     return {**si, "flags": flags, "shared": False}
 
 
-def contacts_on_cortex(sub: Subject, channels: dict, *, surface: str = "midthickness", max_distance_mm: float = 5.0) -> dict | None:
+def fsaverage_map(folder: str | Path, space: str, n_l: int, n_r: int) -> dict[str, Any]:
+    """A template-to-fsaverage vertex lookup: ``tpl-<space>_to_fsaverage_hemi-{L,R}.npz`` in ``folder``, each indexed by the
+    template hemisphere's vertex (``fsaverage_vertex``, ``fsaverage5_vertex``, ``distance_mm``), joined lh then rh as the template
+    surface's vertices are; ``files`` names them with their sha256."""
+    import hashlib
+    d, parts, files = Path(folder), {"fsaverage_vertex": [], "fsaverage5_vertex": [], "distance_mm": []}, {}
+    for side, n in (("L", n_l), ("R", n_r)):
+        f = d / f"tpl-{space}_to_fsaverage_hemi-{side}.npz"
+        if not f.is_file():
+            raise FileNotFoundError(f"{f}: no template-to-fsaverage map for hemisphere {side}")
+        with np.load(f) as z:
+            for k in parts:
+                if k not in z.files:
+                    raise ValueError(f"{f.name}: no '{k}' array")
+                if z[k].shape != (n,):
+                    raise ValueError(f"{f.name}: '{k}' has {z[k].size} entries, the template's hemisphere {side} has {n} vertices")
+                parts[k].append(np.asarray(z[k]))
+        files[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return {**{k: np.concatenate(v) for k, v in parts.items()}, "files": files}
+
+
+def contacts_on_cortex(sub: Subject, channels: dict, *, surface: str = "midthickness", max_distance_mm: float = 5.0,
+                       fsaverage_dir: str | Path | None = None, space: str = "MNI152NLin2009aSym") -> dict | None:
     """Each contact to its nearest vertex of the dataset template's ``surface``: the operator, the distance and vertex
-    Fields and the ``_cortex`` set (module docstring). None without a template holding that surface."""
+    Fields and the ``_cortex`` set (module docstring); with ``fsaverage_dir``, also that vertex's fsaverage lookup. None
+    without a template holding that surface."""
     import zarr
     from scipy.spatial import cKDTree
     from .entities import label_set
@@ -304,6 +331,10 @@ def contacts_on_cortex(sub: Subject, channels: dict, *, surface: str = "midthick
         return None
     tpl_store = sub.root / sub.ds.row["path"] / t["path"]
     V = np.asarray(zarr.open_array(str(tpl_store / f"sources/{surface}/vertices"), mode="r")[...], dtype=np.float64)
+    fsa = None
+    if fsaverage_dir is not None:
+        nv = json.loads(cx["producer_json"])["template"]
+        fsa = fsaverage_map(fsaverage_dir, space, int(nv["nV_lh"]), int(nv["nV_rh"]))
     P = np.asarray(zarr.open_array(str(sub.at(f"timeseries/{channels['name']}")), mode="r")[...], dtype=np.float64)
     has = np.isfinite(P).all(axis=1)
     dist = np.full(len(P), np.nan)
@@ -322,7 +353,7 @@ def contacts_on_cortex(sub: Subject, channels: dict, *, surface: str = "midthick
                        description=f"each contact -> its nearest vertex of {t['name']}'s {surface} within {max_distance_mm:g} mm (1 per contact); "
                                    "farther contacts omitted",
                        producer_json=jdump({"method": "nearest vertex (scipy cKDTree)", "template": t["name"], "surface": surface,
-                                            "max_distance_mm": max_distance_mm}))
+                                            "max_distance_mm": max_distance_mm, **({"fsaverage_map": fsa["files"]} if fsa else {})}))
     base = f"timeseries/{ch}"
     sub.field(name=f"{ch}_cortex_distance", path=f"{base}_cortex_distance", kind="contact distance", manifold_id=channels["id"],
               data=dist.astype(np.float32), unit="m", of_operator_id=oid, session=session,
@@ -330,6 +361,15 @@ def contacts_on_cortex(sub: Subject, channels: dict, *, surface: str = "midthick
     sub.field(name=f"{ch}_cortex_vertex", path=f"{base}_cortex_vertex", kind="contact vertex", manifold_id=channels["id"], value_type="integer",
               data=vtx.astype(np.int32), of_operator_id=oid, session=session,
               description=f"each contact's nearest vertex of {surface}, on or off the cortex (-1: no position)")
+    if fsa:                                      # looked up at the nearest vertex, on or off the cortex like _cortex_vertex
+        for key, nm, what in (("fsaverage_vertex", "fsaverage", "fsaverage (ico7) vertex"), ("fsaverage5_vertex", "fsaverage5", "fsaverage5 vertex")):
+            sub.field(name=f"{ch}_cortex_{nm}", path=f"{base}_cortex_{nm}", kind="contact vertex", manifold_id=channels["id"], value_type="integer",
+                      data=np.where(has, fsa[key][np.where(has, vtx, 0)], -1).astype(np.int32), of_operator_id=oid, session=session,
+                      description=f"the {what} of each contact's nearest template vertex, from the template-to-fsaverage map (-1: no position)")
+        sub.field(name=f"{ch}_cortex_fsaverage_distance", path=f"{base}_cortex_fsaverage_distance", kind="contact distance",
+                  manifold_id=channels["id"], unit="m", of_operator_id=oid, session=session,
+                  data=np.where(has, fsa["distance_mm"][np.where(has, vtx, 0)] / 1000.0, np.nan).astype(np.float32),
+                  description="the template-to-fsaverage map's distance from each contact's nearest template vertex to the registration surface (NaN: no position)")
     state = np.where(on, 0, np.where(has, 1, 2))
     present = sorted(set(state.tolist()))
     words = ["on cortex", "off cortex", "no position"]
@@ -344,11 +384,11 @@ def contacts_on_cortex(sub: Subject, channels: dict, *, surface: str = "midthick
     label_set(sub, f"{base}_cortex", members, manifold_id=channels["id"], session=session,
               description=f"each contact on {t['name']}'s {surface}: on_cortex, and its parcel in " + (", ".join(m[0] for m in members[1:]) or "no parcellation"))
     return {"operator": op, "on_cortex": int(on.sum()), "off_cortex": int((has & ~on).sum()), "no_position": int((~has).sum()),
-            "parcellations": [m[0] for m in members[1:]]}
+            "parcellations": [m[0] for m in members[1:]], **({"fsaverage_map": fsa["files"]} if fsa else {})}
 
 
 def import_bids_ieeg(sub: Subject, bids: str | Path, *, space: str = "MNI152NLin2009aSym", surface: str = "midthickness",
-                     max_distance_mm: float = 5.0, progress=None) -> dict:
+                     max_distance_mm: float = 5.0, fsaverage_dir: str | Path | None = None, progress=None) -> dict:
     """``nxr-convert bids-ieeg``: every run of the BIDS subject named as ``sub`` into it — a run already there (its session)
     is skipped, said so — and each new channel set's contacts on the template."""
     from .convert import session_rows
@@ -390,7 +430,7 @@ def import_bids_ieeg(sub: Subject, bids: str | Path, *, space: str = "MNI152NLin
         done.append(rec)
         emit({"stage": "timeseries", **{k: ri[k] for k in ("name", "n_samples", "sfreq", "events")}})
         if not si["shared"] and efile is not None:
-            m = contacts_on_cortex(sub, si, surface=surface, max_distance_mm=max_distance_mm)
+            m = contacts_on_cortex(sub, si, surface=surface, max_distance_mm=max_distance_mm, fsaverage_dir=fsaverage_dir, space=space)
             if m is None:
                 emit({"stage": "no-template", "message": f"the dataset has no template with sources/{surface}: contacts not mapped (--template-surfaces)"})
             else:

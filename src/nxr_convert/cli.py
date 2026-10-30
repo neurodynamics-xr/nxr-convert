@@ -41,7 +41,7 @@
     nxr-convert mne-eeg  --dataset D --subject S --from DIR --fsaverage DIR [--nsp-subject P]
                                                                                       MNE's EEG source package (nsp mne-eeg-source): EEG, events,
                                                                                       kernels on fsaverage's ico-5 cortex, band power (``mne_eeg.py``)
-    nxr-convert bids-ieeg --dataset D --subject S --bids ROOT [--template-surfaces DIR] [--surface N] [--max-distance-mm D]
+    nxr-convert bids-ieeg --dataset D --subject S --bids ROOT [--template-surfaces DIR] [--surface N] [--max-distance-mm D] [--fsaverage-map DIR]
                                                                                       a BIDS-iEEG subject; its contacts on the template (``bids_ieeg.py``)
     nxr-convert remove   --dataset D --subject S [--node PATH]                      delete a subject, or one node of it
     nxr-convert list <protocol> | scan <protocol>                                     what a protocol holds
@@ -357,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
                      "hemi-{L,R}_atlas-<atlas>_dseg.label.gii + .tsv): imported once as the dataset's template (needs nibabel)")
     pie.add_argument("--surface", default="midthickness", help="the template surface the contacts are mapped onto (default midthickness)")
     pie.add_argument("--max-distance-mm", type=float, default=5.0, help="a contact farther from that surface is not on the cortex (default 5)")
+    pie.add_argument("--fsaverage-map", default=None, help="a folder with tpl-<space>_to_fsaverage_hemi-{L,R}.npz (per template vertex: "
+                     "fsaverage_vertex, fsaverage5_vertex, distance_mm): each contact also gets its nearest vertex's fsaverage lookup")
     pq = sub.add_parser("qc", help="sensor QC of a subject's recordings: the PSD Field, its measures and qc_flag, meg-qc's metrics")
     pq.add_argument("--dataset", required=True)
     pq.add_argument("--subject", required=True)
@@ -524,7 +526,8 @@ def _run(a) -> int:
                     r = import_mne_eeg(sub, a.src, fsaverage=a.fsaverage, prefix=a.nsp_subject, progress=_print)
                 else:
                     from .bids_ieeg import import_bids_ieeg
-                    r = import_bids_ieeg(sub, a.bids, space=a.space, surface=a.surface, max_distance_mm=a.max_distance_mm, progress=_print)
+                    r = import_bids_ieeg(sub, a.bids, space=a.space, surface=a.surface, max_distance_mm=a.max_distance_mm,
+                                         fsaverage_dir=a.fsaverage_map, progress=_print)
             write_catalog(ds.root)
             _print({"stage": "result", **r})
             return 0
